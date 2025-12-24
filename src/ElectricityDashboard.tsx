@@ -12,20 +12,13 @@ import {
   YAxis,
 } from "recharts";
 
-/**
- * Shared electricity dashboard component
- * - Loads /public/data/<type>.csv baseline on every load (cache-busted)
- * - Optional localStorage edits per tab (keyed by type)
- * - Same UI: entry, import/export, stats, daily & monthly charts, tables
- */
+/* -----------------------------
+   Helpers
+----------------------------- */
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n));
 }
-
-// ----------------------
-// Date helpers
-// ----------------------
 
 function parseISOKey(s: string) {
   const ok = /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -34,7 +27,7 @@ function parseISOKey(s: string) {
   return Number.isNaN(d.getTime()) ? null : s;
 }
 
-// Parse DD-MM-YYYY (preferred) -> ISO, also accept ISO for backward compatibility
+// Parse DD-MM-YYYY -> ISO; also accept ISO.
 function parseInputDate(s: unknown) {
   if (typeof s !== "string") return null;
   const t = s.trim();
@@ -47,8 +40,7 @@ function parseInputDate(s: unknown) {
       d.getUTCFullYear() !== yyyy ||
       d.getUTCMonth() !== mm - 1 ||
       d.getUTCDate() !== dd
-    )
-      return null;
+    ) return null;
     return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
   }
 
@@ -62,7 +54,6 @@ function formatDDMMYYYY(iso: string) {
   return `${d}-${m}-${y}`;
 }
 
-// NEW: Display short date DD/MM/YY (for From/To helper label + Week starting label)
 function formatDDMMYY(iso: string) {
   if (!iso || typeof iso !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return "—";
   const [y, m, d] = iso.split("-");
@@ -81,70 +72,14 @@ function isoPlusDays(iso: string, days: number) {
   return d.toISOString().slice(0, 10);
 }
 
-// Week starts on Monday
+// Week starts Monday
 function startOfWeekISO(iso: string) {
   const d = new Date(iso + "T00:00:00Z");
-  const dow = d.getUTCDay(); // 0=Sun,1=Mon,...
+  const dow = d.getUTCDay(); // 0=Sun,1=Mon...
   const diffToMon = dow === 0 ? -6 : 1 - dow;
   d.setUTCDate(d.getUTCDate() + diffToMon);
   return d.toISOString().slice(0, 10);
 }
-
-// ----------------------
-// Number formatting
-// ----------------------
-
-function fmtNum(x: number | null | undefined, digits = 2) {
-  if (x == null || Number.isNaN(x)) return "—";
-  return new Intl.NumberFormat("en-IN", {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  }).format(x);
-}
-
-function fmtPct(x: number | null | undefined, digits = 2) {
-  if (x == null || Number.isNaN(x)) return "—";
-  const sign = x > 0 ? "+" : "";
-  return `${sign}${fmtNum(x, digits)}%`;
-}
-
-function pctColorClass(x: number | null | undefined) {
-  if (x == null || Number.isNaN(x)) return "text-slate-500";
-  if (x > 0) return "text-emerald-700";
-  if (x < 0) return "text-rose-700";
-  return "text-slate-600";
-}
-
-function asFiniteNumber(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-// ----------------------
-// Domains (auto-scale axes with padding)
-// ----------------------
-
-function computeDomain(values: Array<number | null | undefined>, padPct = 0.05, minAbsPad = 1) {
-  const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-  if (!nums.length) return undefined;
-
-  let min = Math.min(...nums);
-  let max = Math.max(...nums);
-
-  if (min === max) {
-    const pad = Math.max(minAbsPad, Math.abs(min) * padPct);
-    return [min - pad, max + pad] as [number, number];
-  }
-
-  const range = max - min;
-  const pad = Math.max(minAbsPad, range * padPct);
-  return [min - pad, max + pad] as [number, number];
-}
-
-// ----------------------
-// Aggregation + growth
-// ----------------------
 
 function monthKey(isoDate: string) {
   return isoDate.slice(0, 7); // YYYY-MM
@@ -178,257 +113,39 @@ function sortISO(a: string, b: string) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function mergeRecords(
-  existingMap: Map<string, number>,
-  incoming: Array<{ date: string; value: number }>
-) {
-  const next = new Map(existingMap);
-  for (const r of incoming) next.set(r.date, r.value);
-  return next;
+function asFiniteNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
-function downloadCSV(filename: string, text: string) {
-  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-// ----------------------
-// Data types
-// ----------------------
-
-type DailyPoint = { date: string; value: number };
-
-type DailyChartPoint = {
-  label: string;
-  units: number;
-  prev_year_units: number | null;
-  yoy_pct: number | null;
-  mom_pct: number | null; // weekly: WoW%, monthly: MoM%
-};
-
-// ----------------------
-// KPI + monthly computation
-// ----------------------
-
-function computeKPIs(sortedDaily: DailyPoint[]) {
-  if (sortedDaily.length === 0) {
-    return {
-      latest: null as DailyPoint | null,
-      latestYoY: null as number | null,
-
-      avg7: null as number | null,
-      avg7YoY: null as number | null,
-
-      avg30: null as number | null,
-      avg30YoY: null as number | null,
-
-      ytdTotal: null as number | null,
-      ytdYoY: null as number | null,
-
-      mtdAvg: null as number | null,
-      mtdYoY: null as number | null,
-    };
+function computeDomain(values: Array<number | null | undefined>, padPct = 0.05, minAbsPad = 1) {
+  const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!nums.length) return undefined;
+  let min = Math.min(...nums);
+  let max = Math.max(...nums);
+  if (min === max) {
+    const pad = Math.max(minAbsPad, Math.abs(min) * padPct);
+    return [min - pad, max + pad] as [number, number];
   }
-
-  const dailyLookup = new Map(sortedDaily.map((d) => [d.date, d.value] as const));
-  const latest = sortedDaily[sortedDaily.length - 1];
-
-  const isoAddYears = (iso: string, deltaYears: number) => {
-    const y = Number(iso.slice(0, 4));
-    const m = Number(iso.slice(5, 7));
-    const d = Number(iso.slice(8, 10));
-
-    const tryDt = new Date(Date.UTC(y + deltaYears, m - 1, d));
-    if (
-      tryDt.getUTCFullYear() === y + deltaYears &&
-      tryDt.getUTCMonth() === m - 1 &&
-      tryDt.getUTCDate() === d
-    ) {
-      return tryDt.toISOString().slice(0, 10);
-    }
-
-    const lastDay = new Date(Date.UTC(y + deltaYears, m, 0));
-    return lastDay.toISOString().slice(0, 10);
-  };
-
-  const sumAndCountInclusive = (startIso: string, endIso: string) => {
-    if (startIso > endIso) return { sum: null as number | null, count: 0 };
-
-    let sum = 0;
-    let count = 0;
-    let cur = startIso;
-
-    while (cur <= endIso) {
-      const v = dailyLookup.get(cur);
-      if (v != null) {
-        sum += v;
-        count += 1;
-      }
-      cur = isoPlusDays(cur, 1);
-    }
-
-    return { sum: count ? sum : null, count };
-  };
-
-  const avgForLastNDaysEnding = (endIso: string, nDays: number) => {
-    const startIso = isoMinusDays(endIso, nDays - 1);
-    const { sum, count } = sumAndCountInclusive(startIso, endIso);
-    return { startIso, endIso, avg: sum != null && count ? sum / count : null };
-  };
-
-  const prevYearDate = isoAddYears(latest.date, -1);
-  const prevYearVal = dailyLookup.get(prevYearDate) ?? null;
-  const latestYoY = prevYearVal != null ? growthPct(latest.value, prevYearVal) : null;
-
-  const last7 = avgForLastNDaysEnding(latest.date, 7);
-  const py7 = sumAndCountInclusive(
-    isoAddYears(last7.startIso, -1),
-    isoAddYears(last7.endIso, -1)
-  );
-  const avg7 = last7.avg;
-  const avg7PY = py7.sum != null && py7.count ? py7.sum / py7.count : null;
-  const avg7YoY = avg7 != null && avg7PY != null ? growthPct(avg7, avg7PY) : null;
-
-  const last30 = avgForLastNDaysEnding(latest.date, 30);
-  const py30 = sumAndCountInclusive(
-    isoAddYears(last30.startIso, -1),
-    isoAddYears(last30.endIso, -1)
-  );
-  const avg30 = last30.avg;
-  const avg30PY = py30.sum != null && py30.count ? py30.sum / py30.count : null;
-  const avg30YoY = avg30 != null && avg30PY != null ? growthPct(avg30, avg30PY) : null;
-
-  const latestY = Number(latest.date.slice(0, 4));
-  const latestM = Number(latest.date.slice(5, 7));
-  const fyStartYear = latestM >= 4 ? latestY : latestY - 1;
-  const ytdStart = `${fyStartYear}-04-01`;
-
-  const ytd = sumAndCountInclusive(ytdStart, latest.date);
-  const ytdTotal = ytd.sum;
-
-  const ytdPYStart = `${fyStartYear - 1}-04-01`;
-  const ytdPYEnd = isoAddYears(latest.date, -1);
-  const ytdPY = sumAndCountInclusive(ytdPYStart, ytdPYEnd);
-  const ytdTotalPY = ytdPY.sum;
-  const ytdYoY =
-    ytdTotal != null && ytdTotalPY != null ? growthPct(ytdTotal, ytdTotalPY) : null;
-
-  const thisMonthStart = `${latest.date.slice(0, 7)}-01`;
-  const mtd = sumAndCountInclusive(thisMonthStart, latest.date);
-  const mtdAvg = mtd.sum != null && mtd.count ? mtd.sum / mtd.count : null;
-
-  const mtdPY = sumAndCountInclusive(
-    isoAddYears(thisMonthStart, -1),
-    isoAddYears(latest.date, -1)
-  );
-  const mtdAvgPY = mtdPY.sum != null && mtdPY.count ? mtdPY.sum / mtdPY.count : null;
-  const mtdYoY = mtdAvg != null && mtdAvgPY != null ? growthPct(mtdAvg, mtdAvgPY) : null;
-
-  return {
-    latest,
-    latestYoY,
-    avg7,
-    avg7YoY,
-    avg30,
-    avg30YoY,
-    ytdTotal,
-    ytdYoY,
-    mtdAvg,
-    mtdYoY,
-  };
+  const range = max - min;
+  const pad = Math.max(minAbsPad, range * padPct);
+  return [min - pad, max + pad] as [number, number];
 }
 
-function buildMonthDayMap(sortedDaily: DailyPoint[]) {
-  const map = new Map<string, { total: number; maxDay: number; byDay: Map<number, number> }>();
-
-  for (const d of sortedDaily) {
-    const m = monthKey(d.date);
-    const day = Number(d.date.slice(8, 10));
-
-    if (!map.has(m)) map.set(m, { total: 0, maxDay: 0, byDay: new Map() });
-
-    const rec = map.get(m)!;
-    rec.total += d.value;
-    rec.maxDay = Math.max(rec.maxDay, day);
-    rec.byDay.set(day, (rec.byDay.get(day) || 0) + d.value);
-  }
-
-  return map;
+function pctColorClass(x: number | null | undefined) {
+  if (x == null || Number.isNaN(x)) return "text-slate-500";
+  if (x > 0) return "text-emerald-700";
+  if (x < 0) return "text-rose-700";
+  return "text-slate-600";
 }
 
-function sumMonthUpToDay(monthRec: { byDay: Map<number, number> } | undefined, dayLimit: number) {
-  if (!monthRec) return null;
-  let s = 0;
-  let hasAny = false;
-  for (let day = 1; day <= dayLimit; day++) {
-    const v = monthRec.byDay.get(day);
-    if (v != null) {
-      s += v;
-      hasAny = true;
-    }
-  }
-  return hasAny ? s : null;
-}
+/* -----------------------------
+   CSV parsing
+   - Accepts: date,<value> with any 2nd column name.
+----------------------------- */
 
-function toMonthly(sortedDaily: DailyPoint[]) {
-  const monthMap = buildMonthDayMap(sortedDaily);
-  const months = Array.from(monthMap.keys()).sort(sortISO);
-
-  const out = months.map((m) => ({
-    month: m,
-    total_gwh: monthMap.get(m)!.total,
-    max_day: monthMap.get(m)!.maxDay,
-    yoy_pct: null as number | null,
-    mom_pct: null as number | null,
-  }));
-
-  for (const r of out) {
-    const prevMonth = addMonths(r.month, -1);
-    const prevMonthRec = monthMap.get(prevMonth);
-    const prevComparableMoM = sumMonthUpToDay(prevMonthRec, r.max_day);
-    r.mom_pct = prevComparableMoM != null ? growthPct(r.total_gwh, prevComparableMoM) : null;
-
-    const prevYearMonth = `${getYear(r.month) - 1}-${String(getMonth(r.month)).padStart(2, "0")}`;
-    const prevYearRec = monthMap.get(prevYearMonth);
-    const prevComparableYoY = sumMonthUpToDay(prevYearRec, r.max_day);
-    r.yoy_pct = prevComparableYoY != null ? growthPct(r.total_gwh, prevComparableYoY) : null;
-  }
-
-  return out;
-}
-
-// ----------------------
-// Weekly + FY helpers for table dropdown
-// ----------------------
-
-function fyLabelFromIso(iso: string) {
-  const y = Number(iso.slice(0, 4));
-  const m = Number(iso.slice(5, 7));
-  // FY starts Apr => FY25 means Apr-2024 to Mar-2025
-  const fyEndYear = m >= 4 ? y + 1 : y;
-  return `FY${String(fyEndYear).slice(2)}`;
-}
-
-function fyStartIsoFromFYLabel(fy: string) {
-  // FY25 => start 2024-04-01
-  const yy = Number(fy.slice(2));
-  const fyEndYear = 2000 + yy;
-  const fyStartYear = fyEndYear - 1;
-  return `${fyStartYear}-04-01`;
-}
-
-// ----------------------
-// CSV helpers (type-aware)
-// ----------------------
-
-function csvParse(text: string, valueColumnKey: string) {
+function csvParse(text: string) {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -440,12 +157,10 @@ function csvParse(text: string, valueColumnKey: string) {
     if (cols.length >= 2) rows.push(cols);
   }
 
-  // header optional
+  // Optional header: if col0 contains "date", drop it.
   if (rows.length) {
     const h0 = (rows[0][0] || "").toLowerCase();
-    const h1 = (rows[0][1] || "").toLowerCase();
-    const key = valueColumnKey.toLowerCase();
-    if (h0.includes("date") && (h1.includes(key) || h1.includes("gwh"))) rows.shift();
+    if (h0.includes("date")) rows.shift();
   }
 
   const parsed: Array<{ date: string; value: number }> = [];
@@ -460,12 +175,10 @@ function csvParse(text: string, valueColumnKey: string) {
       errors.push(`Row ${i + 1}: invalid date '${dRaw}' (expected DD-MM-YYYY)`);
       continue;
     }
-
-    if (!Number.isFinite(v) || v < 0) {
-      errors.push(`Row ${i + 1}: invalid value '${vRaw}' (expected non-negative number)`);
+    if (!Number.isFinite(v)) {
+      errors.push(`Row ${i + 1}: invalid value '${vRaw}'`);
       continue;
     }
-
     parsed.push({ date, value: v });
   }
 
@@ -475,15 +188,272 @@ function csvParse(text: string, valueColumnKey: string) {
 function sampleCSV(valueColumnKey: string) {
   return [
     `date,${valueColumnKey}`,
-    "18-12-2025,4140",
-    "19-12-2025,4215",
-    "20-12-2025,4198",
+    "18-12-2025,10",
+    "19-12-2025,11",
+    "20-12-2025,12",
   ].join("\n");
 }
 
-// ----------------------
-// UI components
-// ----------------------
+function downloadCSV(filename: string, text: string) {
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function mergeRecords(existingMap: Map<string, number>, incoming: Array<{ date: string; value: number }>) {
+  const next = new Map(existingMap);
+  for (const r of incoming) next.set(r.date, r.value);
+  return next;
+}
+
+/* -----------------------------
+   Aggregation structures
+----------------------------- */
+
+type DailyPoint = { date: string; value: number };
+
+type DailyChartPoint = {
+  label: string;
+  units: number;
+  prev_year_units: number | null;
+  yoy_pct: number | null;
+  mom_pct: number | null; // weekly: WoW%, monthly: MoM%
+};
+
+// Month map with sum+count (for avg mode)
+function buildMonthAggMap(sortedDaily: DailyPoint[]) {
+  const map = new Map<
+    string,
+    { sum: number; count: number; maxDay: number; byDaySum: Map<number, number>; byDayCount: Map<number, number> }
+  >();
+
+  for (const d of sortedDaily) {
+    const m = monthKey(d.date);
+    const day = Number(d.date.slice(8, 10));
+    if (!map.has(m)) {
+      map.set(m, { sum: 0, count: 0, maxDay: 0, byDaySum: new Map(), byDayCount: new Map() });
+    }
+    const rec = map.get(m)!;
+    rec.sum += d.value;
+    rec.count += 1;
+    rec.maxDay = Math.max(rec.maxDay, day);
+    rec.byDaySum.set(day, (rec.byDaySum.get(day) || 0) + d.value);
+    rec.byDayCount.set(day, (rec.byDayCount.get(day) || 0) + 1);
+  }
+
+  return map;
+}
+
+function sumMonthUpToDay(monthRec: { byDaySum: Map<number, number> } | undefined, dayLimit: number) {
+  if (!monthRec) return null;
+  let s = 0;
+  let hasAny = false;
+  for (let day = 1; day <= dayLimit; day++) {
+    const v = monthRec.byDaySum.get(day);
+    if (v != null) {
+      s += v;
+      hasAny = true;
+    }
+  }
+  return hasAny ? s : null;
+}
+
+function avgMonthFull(monthRec: { sum: number; count: number } | undefined) {
+  if (!monthRec || !monthRec.count) return null;
+  return monthRec.sum / monthRec.count;
+}
+
+function toMonthlySumComparable(sortedDaily: DailyPoint[]) {
+  // existing monthly logic (sum) with comparable day-window (prevents partial distortions)
+  const monthMap = buildMonthAggMap(sortedDaily);
+  const months = Array.from(monthMap.keys()).sort(sortISO);
+
+  const out = months.map((m) => ({
+    month: m,
+    value: monthMap.get(m)!.sum,     // SUM
+    max_day: monthMap.get(m)!.maxDay,
+    yoy_pct: null as number | null,
+    mom_pct: null as number | null,
+  }));
+
+  for (const r of out) {
+    const prevMonth = addMonths(r.month, -1);
+    const prevMonthRec = monthMap.get(prevMonth);
+    const prevComparableMoM = sumMonthUpToDay(prevMonthRec, r.max_day);
+    r.mom_pct = prevComparableMoM != null ? growthPct(r.value, prevComparableMoM) : null;
+
+    const prevYearMonth = `${getYear(r.month) - 1}-${String(getMonth(r.month)).padStart(2, "0")}`;
+    const prevYearRec = monthMap.get(prevYearMonth);
+    const prevComparableYoY = sumMonthUpToDay(prevYearRec, r.max_day);
+    r.yoy_pct = prevComparableYoY != null ? growthPct(r.value, prevComparableYoY) : null;
+  }
+
+  return out;
+}
+
+function toMonthlyAvgFull(sortedDaily: DailyPoint[]) {
+  // avg mode: FULL month average, YoY vs full month last year average, MoM vs previous month average
+  const monthMap = buildMonthAggMap(sortedDaily);
+  const months = Array.from(monthMap.keys()).sort(sortISO);
+
+  return months.map((m) => {
+    const currAvg = avgMonthFull(monthMap.get(m)) ?? 0;
+
+    const prevMonth = addMonths(m, -1);
+    const prevAvg = avgMonthFull(monthMap.get(prevMonth));
+
+    const prevYearMonth = `${getYear(m) - 1}-${String(getMonth(m)).padStart(2, "0")}`;
+    const prevYearAvg = avgMonthFull(monthMap.get(prevYearMonth));
+
+    return {
+      month: m,
+      value: currAvg,
+      yoy_pct: prevYearAvg != null ? growthPct(currAvg, prevYearAvg) : null,
+      mom_pct: prevAvg != null ? growthPct(currAvg, prevAvg) : null,
+    };
+  });
+}
+
+/* -----------------------------
+   KPIs
+----------------------------- */
+
+function computeKPIs(sortedDaily: DailyPoint[], calcMode: "sum" | "avg") {
+  if (sortedDaily.length === 0) {
+    return {
+      latest: null as DailyPoint | null,
+      latestYoY: null as number | null,
+
+      avg7: null as number | null,
+      avg7YoY: null as number | null,
+
+      avg30: null as number | null,
+      avg30YoY: null as number | null,
+
+      ytdValue: null as number | null,
+      ytdYoY: null as number | null,
+
+      mtdAvg: null as number | null,
+      mtdYoY: null as number | null,
+    };
+  }
+
+  const dailyLookup = new Map(sortedDaily.map((d) => [d.date, d.value] as const));
+  const latest = sortedDaily[sortedDaily.length - 1];
+
+  const isoAddYears = (iso: string, deltaYears: number) => {
+    const y = Number(iso.slice(0, 4));
+    const m = Number(iso.slice(5, 7));
+    const d = Number(iso.slice(8, 10));
+    const tryDt = new Date(Date.UTC(y + deltaYears, m - 1, d));
+    if (
+      tryDt.getUTCFullYear() === y + deltaYears &&
+      tryDt.getUTCMonth() === m - 1 &&
+      tryDt.getUTCDate() === d
+    ) return tryDt.toISOString().slice(0, 10);
+    const lastDay = new Date(Date.UTC(y + deltaYears, m, 0));
+    return lastDay.toISOString().slice(0, 10);
+  };
+
+  const sumCountInclusive = (startIso: string, endIso: string) => {
+    if (startIso > endIso) return { sum: null as number | null, count: 0 };
+    let sum = 0;
+    let count = 0;
+    let cur = startIso;
+    while (cur <= endIso) {
+      const v = dailyLookup.get(cur);
+      if (v != null) {
+        sum += v;
+        count += 1;
+      }
+      cur = isoPlusDays(cur, 1);
+    }
+    return { sum: count ? sum : null, count };
+  };
+
+  const avgForLastNDaysEnding = (endIso: string, nDays: number) => {
+    const startIso = isoMinusDays(endIso, nDays - 1);
+    const { sum, count } = sumCountInclusive(startIso, endIso);
+    return { startIso, endIso, avg: sum != null && count ? sum / count : null };
+  };
+
+  // Latest YoY (same date)
+  const prevYearDate = isoAddYears(latest.date, -1);
+  const prevYearVal = dailyLookup.get(prevYearDate) ?? null;
+  const latestYoY = prevYearVal != null ? growthPct(latest.value, prevYearVal) : null;
+
+  // 7d avg + YoY on avg
+  const last7 = avgForLastNDaysEnding(latest.date, 7);
+  const py7 = sumCountInclusive(isoAddYears(last7.startIso, -1), isoAddYears(last7.endIso, -1));
+  const avg7 = last7.avg;
+  const avg7PY = py7.sum != null && py7.count ? py7.sum / py7.count : null;
+  const avg7YoY = avg7 != null && avg7PY != null ? growthPct(avg7, avg7PY) : null;
+
+  // 30d avg + YoY on avg
+  const last30 = avgForLastNDaysEnding(latest.date, 30);
+  const py30 = sumCountInclusive(isoAddYears(last30.startIso, -1), isoAddYears(last30.endIso, -1));
+  const avg30 = last30.avg;
+  const avg30PY = py30.sum != null && py30.count ? py30.sum / py30.count : null;
+  const avg30YoY = avg30 != null && avg30PY != null ? growthPct(avg30, avg30PY) : null;
+
+  // FY window
+  const latestY = Number(latest.date.slice(0, 4));
+  const latestM = Number(latest.date.slice(5, 7));
+  const fyStartYear = latestM >= 4 ? latestY : latestY - 1;
+  const ytdStart = `${fyStartYear}-04-01`;
+
+  const ytd = sumCountInclusive(ytdStart, latest.date);
+
+  const ytdPYStart = `${fyStartYear - 1}-04-01`;
+  const ytdPYEnd = isoAddYears(latest.date, -1);
+  const ytdPY = sumCountInclusive(ytdPYStart, ytdPYEnd);
+
+  // SUM tabs: show YTD total
+  // AVG tabs: show YTD average daily
+  const ytdValue =
+    calcMode === "sum"
+      ? ytd.sum
+      : (ytd.sum != null && ytd.count ? ytd.sum / ytd.count : null);
+
+  const ytdValuePY =
+    calcMode === "sum"
+      ? ytdPY.sum
+      : (ytdPY.sum != null && ytdPY.count ? ytdPY.sum / ytdPY.count : null);
+
+  const ytdYoY = ytdValue != null && ytdValuePY != null ? growthPct(ytdValue, ytdValuePY) : null;
+
+  // MTD avg (always avg)
+  const thisMonthStart = `${latest.date.slice(0, 7)}-01`;
+  const mtd = sumCountInclusive(thisMonthStart, latest.date);
+  const mtdAvg = mtd.sum != null && mtd.count ? mtd.sum / mtd.count : null;
+
+  const mtdPY = sumCountInclusive(isoAddYears(thisMonthStart, -1), isoAddYears(latest.date, -1));
+  const mtdAvgPY = mtdPY.sum != null && mtdPY.count ? mtdPY.sum / mtdPY.count : null;
+  const mtdYoY = mtdAvg != null && mtdAvgPY != null ? growthPct(mtdAvg, mtdAvgPY) : null;
+
+  return {
+    latest,
+    latestYoY,
+    avg7,
+    avg7YoY,
+    avg30,
+    avg30YoY,
+    ytdValue,
+    ytdYoY,
+    mtdAvg,
+    mtdYoY,
+  };
+}
+
+/* -----------------------------
+   UI Components
+----------------------------- */
 
 function Card({
   title,
@@ -517,60 +487,39 @@ function Stat({
   return (
     <div className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
       <div className="text-xs font-medium text-slate-500">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-slate-900">{value}</div>
+      <div className="mt-1 text-2xl font-semibold text-slate-900 tabular-nums">{value}</div>
       {sub ? <div className="mt-1">{sub}</div> : null}
     </div>
   );
 }
 
 function YoYSub({ value, suffix = "YoY" }: { value: number | null | undefined; suffix?: string }) {
-  // Bigger + bolder YoY subtext per request
   return (
     <div className={`text-sm font-semibold ${pctColorClass(value)} tabular-nums`}>
-      {fmtPct(value, 2)} <span className="font-semibold">{suffix}</span>
+      {value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`}{" "}
+      <span className="font-semibold">{suffix}</span>
     </div>
   );
 }
 
-function MutedSub({ text }: { text: string }) {
-  return <div className="text-sm font-medium text-slate-500">{text}</div>;
-}
-
-function EmptyState({ onLoadSample }: { onLoadSample: () => void }) {
-  return (
-    <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center">
-      <div className="mx-auto max-w-xl">
-        <div className="text-lg font-semibold text-slate-900">No data yet</div>
-        <div className="mt-2 text-sm text-slate-600">
-          Add your first daily datapoint (units/MU) or import a CSV. The dashboard will compute monthly totals, YoY%, and
-          MoM%.
-        </div>
-        <div className="mt-5 flex flex-wrap justify-center gap-3">
-          <button
-            onClick={onLoadSample}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-          >
-            Load sample data
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ----------------------
-// Component
-// ----------------------
+/* -----------------------------
+   Main Component
+----------------------------- */
 
 export type ElectricityDashboardProps = {
-  type: "generation" | "demand" | "supply";
+  type: string;
   title: string;
   subtitle: string;
-  seriesLabel: string; // e.g., "Generation", "Demand", "Supply"
-  unitLabel: string; // e.g., "units / MU"
-  valueColumnKey: string; // e.g., generation_gwh, demand_gwh, supply_gwh
-  defaultCsvPath?: string; // default: /data/<type>.csv
-  enableAutoFetch?: boolean; // default: true for generation
+  seriesLabel: string;
+  unitLabel: string;
+
+  valueColumnKey: string; // used for export header + sample CSV
+
+  defaultCsvPath: string;
+  enableAutoFetch?: boolean;
+
+  calcMode: "sum" | "avg"; // NEW: sum for Gen/Demand/Supply, avg for Coal PLF/RTM
+  valueDisplay: { suffix: string; decimals: number }; // NEW: units rendering
 };
 
 export default function ElectricityDashboard(props: ElectricityDashboardProps) {
@@ -581,11 +530,27 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     seriesLabel,
     unitLabel,
     valueColumnKey,
-    defaultCsvPath = `/data/${type}.csv`,
-    enableAutoFetch = true,
+    defaultCsvPath,
+    enableAutoFetch = false,
+    calcMode,
+    valueDisplay,
   } = props;
 
   const STORAGE_KEY = `tusk_india_${type}_v1`;
+
+  const fmtValue = (x: number | null | undefined) => {
+    if (x == null || Number.isNaN(x)) return "—";
+    return `${new Intl.NumberFormat("en-IN", {
+      minimumFractionDigits: valueDisplay.decimals,
+      maximumFractionDigits: valueDisplay.decimals,
+    }).format(x)}${valueDisplay.suffix}`;
+    };
+
+  const fmtPct = (x: number | null | undefined) => {
+    if (x == null || Number.isNaN(x)) return "—";
+    const sign = x > 0 ? "+" : "";
+    return `${sign}${x.toFixed(2)}%`;
+  };
 
   const [dataMap, setDataMap] = useState<Map<string, number>>(() => {
     try {
@@ -597,7 +562,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       for (const [k, v] of entries) {
         const d = parseISOKey(k);
         const n = Number(v);
-        if (d && Number.isFinite(n) && n >= 0) m.set(d, n);
+        if (d && Number.isFinite(n)) m.set(d, n);
       }
       return m;
     } catch {
@@ -623,14 +588,12 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const [toIso, setToIso] = useState("");
   const [aggFreq, setAggFreq] = useState<"daily" | "weekly" | "monthly" | "rolling30">("daily");
 
-  // Series toggles
   const [showUnitsSeries, setShowUnitsSeries] = useState(true);
   const [showPrevYearSeries, setShowPrevYearSeries] = useState(true);
   const [showYoYSeries, setShowYoYSeries] = useState(true);
   const [showMoMSeries, setShowMoMSeries] = useState(true);
   const [showControlLines, setShowControlLines] = useState(false);
 
-  // NEW: Monthly table periodicity dropdown
   const [tablePeriod, setTablePeriod] = useState<"monthly" | "weekly" | "yearly">("monthly");
 
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -639,24 +602,22 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     document.title = title;
   }, [title]);
 
-  // ---- Load CSV baseline on each mount (cache-bust) ----
+  // Load CSV from public (GitHub-backed) path, support spaces using encodeURI
   useEffect(() => {
     let cancelled = false;
 
     async function loadDefaultCSV() {
       try {
-        const url = `${defaultCsvPath}?v=${Date.now()}`;
+        const url = `${encodeURI(defaultCsvPath)}?v=${Date.now()}`;
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
         const text = await res.text();
-        const { parsed, errors: errs } = csvParse(text, valueColumnKey);
+
+        const { parsed, errors: errs } = csvParse(text);
         if (cancelled) return;
 
         if (!parsed.length) {
-          setErrors((prev) =>
-            prev.length ? prev : [`Default CSV loaded but no valid rows were found for ${type}.`]
-          );
+          setErrors((prev) => prev.length ? prev : [`Default CSV loaded but no valid rows found for ${type}.`]);
           return;
         }
 
@@ -666,15 +627,13 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
         setDataMap(m);
 
         if (errs.length) {
-          setFetchStatus(`Loaded ${type}.csv (${parsed.length} rows) with ${errs.length} issues.`);
+          setFetchStatus(`Loaded (${parsed.length} rows) with ${errs.length} issues.`);
         } else {
-          setFetchStatus(`Loaded ${type}.csv (${parsed.length} rows).`);
+          setFetchStatus(`Loaded (${parsed.length} rows).`);
         }
       } catch {
         if (!cancelled) {
-          setErrors((prev) =>
-            prev.length ? prev : [`Could not load default CSV (${defaultCsvPath}).`]
-          );
+          setErrors((prev) => prev.length ? prev : [`Could not load default CSV (${defaultCsvPath}).`]);
         }
       }
     }
@@ -683,9 +642,8 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     return () => {
       cancelled = true;
     };
-  }, [defaultCsvPath, type, valueColumnKey]);
+  }, [defaultCsvPath, type]);
 
-  // Persist local edits
   useEffect(() => {
     const obj = Object.fromEntries(dataMap.entries());
     localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
@@ -697,7 +655,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       .sort((a, b) => sortISO(a.date, b.date));
   }, [dataMap]);
 
-  // Initialize slicer after data loads
   useEffect(() => {
     if (!sortedDaily.length) return;
     const lastIso = sortedDaily[sortedDaily.length - 1].date;
@@ -705,7 +662,11 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     if (!fromIso) setFromIso(isoMinusDays(lastIso, clamp(rangeDays, 7, 3650)));
   }, [sortedDaily, toIso, fromIso, rangeDays]);
 
-  // Chart data
+  const dailyLookup = useMemo(() => new Map(sortedDaily.map((d) => [d.date, d.value] as const)), [sortedDaily]);
+
+  // Used for Monthly view in Daily chart: full-month sums/avgs even if From is mid-month
+  const monthAggMap = useMemo(() => buildMonthAggMap(sortedDaily), [sortedDaily]);
+
   const dailyForChart = useMemo<DailyChartPoint[]>(() => {
     if (!sortedDaily.length) return [];
 
@@ -717,22 +678,21 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     const t = effectiveFrom <= effectiveTo ? effectiveTo : effectiveFrom;
 
     const filtered = sortedDaily.filter((d) => d.date >= f && d.date <= t);
-    const dailyLookup = new Map(sortedDaily.map((d) => [d.date, d.value]));
 
-    const sumRangeInclusive = (startIso: string, endIso: string) => {
-      if (startIso > endIso) return null;
-      let s = 0;
-      let hasAny = false;
+    const sumCountRangeInclusive = (startIso: string, endIso: string) => {
+      if (startIso > endIso) return { sum: null as number | null, count: 0 };
+      let sum = 0;
+      let count = 0;
       let cur = startIso;
       while (cur <= endIso) {
         const v = dailyLookup.get(cur);
         if (v != null) {
-          s += v;
-          hasAny = true;
+          sum += v;
+          count += 1;
         }
         cur = isoPlusDays(cur, 1);
       }
-      return hasAny ? s : null;
+      return { sum: count ? sum : null, count };
     };
 
     if (aggFreq === "daily") {
@@ -762,22 +722,31 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       });
     }
 
+    // Rolling 30: sum vs avg based on calcMode
     if (aggFreq === "rolling30") {
       const points: DailyChartPoint[] = [];
       let cur = f;
       while (cur <= t) {
         const start = isoMinusDays(cur, 29);
-        const currSum = sumRangeInclusive(start, cur);
+        const currSC = sumCountRangeInclusive(start, cur);
+        const currVal =
+          calcMode === "sum"
+            ? (currSC.sum ?? 0)
+            : (currSC.sum != null && currSC.count ? currSC.sum / currSC.count : 0);
 
         const curPrevYear = isoMinusDays(cur, 365);
         const startPrevYear = isoMinusDays(curPrevYear, 29);
-        const prevSum = sumRangeInclusive(startPrevYear, curPrevYear);
+        const prevSC = sumCountRangeInclusive(startPrevYear, curPrevYear);
+        const prevVal =
+          calcMode === "sum"
+            ? prevSC.sum
+            : (prevSC.sum != null && prevSC.count ? prevSC.sum / prevSC.count : null);
 
         points.push({
           label: formatDDMMYYYY(cur),
-          units: currSum ?? 0,
-          prev_year_units: prevSum,
-          yoy_pct: currSum != null && prevSum != null ? growthPct(currSum, prevSum) : null,
+          units: currVal,
+          prev_year_units: prevVal,
+          yoy_pct: prevVal != null ? growthPct(currVal, prevVal) : null,
           mom_pct: null,
         });
 
@@ -786,249 +755,343 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       return points;
     }
 
+    // Weekly: FULL week avg/sum (not partial slice) in range
     if (aggFreq === "weekly") {
-      const weekMap = new Map<string, number>();
-      const weekOffsets = new Map<string, Set<number>>();
+      const startW = startOfWeekISO(f);
+      const endW = startOfWeekISO(t);
 
-      for (const d of filtered) {
+      // build full dataset week maps
+      const weekSum = new Map<string, number>();
+      const weekCount = new Map<string, number>();
+      for (const d of sortedDaily) {
         const wk = startOfWeekISO(d.date);
-        weekMap.set(wk, (weekMap.get(wk) || 0) + d.value);
-
-        const off = Math.floor(
-          (new Date(d.date + "T00:00:00Z").getTime() - new Date(wk + "T00:00:00Z").getTime()) /
-            86400000
-        );
-        if (!weekOffsets.has(wk)) weekOffsets.set(wk, new Set());
-        weekOffsets.get(wk)!.add(off);
+        weekSum.set(wk, (weekSum.get(wk) || 0) + d.value);
+        weekCount.set(wk, (weekCount.get(wk) || 0) + 1);
       }
 
-      const weeks = Array.from(weekMap.keys()).sort(sortISO);
-
-      const sumWeekByOffsets = (weekStartIso: string, offsetsSet: Set<number>) => {
-        let s = 0;
-        let hasAny = false;
-        for (const off of offsetsSet) {
-          const key = isoPlusDays(weekStartIso, off);
-          const v = dailyLookup.get(key);
-          if (v != null) {
-            s += v;
-            hasAny = true;
-          }
-        }
-        return hasAny ? s : null;
-      };
+      const weeks: string[] = [];
+      let wkCursor = startW;
+      while (wkCursor <= endW) {
+        if (weekSum.has(wkCursor)) weeks.push(wkCursor);
+        wkCursor = isoPlusDays(wkCursor, 7);
+        if (weeks.length > 600) break;
+      }
 
       return weeks.map((wk) => {
-        const curr = weekMap.get(wk)!;
-        const offs = weekOffsets.get(wk) || new Set<number>();
+        const sum = weekSum.get(wk)!;
+        const cnt = weekCount.get(wk)!;
+        const curr = calcMode === "sum" ? sum : sum / cnt;
 
-        const prevWkYoY = isoMinusDays(wk, 364);
-        const prevYoY = sumWeekByOffsets(prevWkYoY, offs);
+        const prevWk = isoMinusDays(wk, 7);
+        const prevSum = weekSum.get(prevWk);
+        const prevCnt = weekCount.get(prevWk);
+        const prevVal = prevSum != null && prevCnt ? (calcMode === "sum" ? prevSum : prevSum / prevCnt) : null;
 
-        const prevWkWoW = isoMinusDays(wk, 7);
-        const prevWoW = sumWeekByOffsets(prevWkWoW, offs);
+        const prevYearWk = isoMinusDays(wk, 364);
+        const pySum = weekSum.get(prevYearWk);
+        const pyCnt = weekCount.get(prevYearWk);
+        const pyVal = pySum != null && pyCnt ? (calcMode === "sum" ? pySum : pySum / pyCnt) : null;
 
         return {
           label: `Wk of ${formatDDMMYYYY(wk)}`,
           units: curr,
-          prev_year_units: prevYoY,
-          yoy_pct: prevYoY != null ? growthPct(curr, prevYoY) : null,
-          mom_pct: prevWoW != null ? growthPct(curr, prevWoW) : null,
+          prev_year_units: pyVal,
+          yoy_pct: pyVal != null ? growthPct(curr, pyVal) : null,
+          mom_pct: prevVal != null ? growthPct(curr, prevVal) : null, // WoW
         };
       });
     }
 
-    // monthly
-    const mMap = new Map<string, number>();
-    const monthDays = new Map<string, Set<number>>();
+    // Monthly: FULL month sum/avg in range (fixes Dec-2023 issue and matches avg requirement)
+    const startYM = monthKey(f);
+    const endYM = monthKey(t);
 
-    for (const d of filtered) {
-      const mk = monthKey(d.date);
-      mMap.set(mk, (mMap.get(mk) || 0) + d.value);
-
-      const day = Number(d.date.slice(8, 10));
-      if (!monthDays.has(mk)) monthDays.set(mk, new Set());
-      monthDays.get(mk)!.add(day);
+    const months: string[] = [];
+    let cursor = startYM;
+    while (cursor <= endYM) {
+      if (monthAggMap.has(cursor)) months.push(cursor);
+      cursor = addMonths(cursor, 1);
+      if (months.length > 600) break;
     }
 
-    const months = Array.from(mMap.keys()).sort(sortISO);
-
-    const sumMonthByDaySet = (ym: string, daySet: Set<number>) => {
-      const y = ym.slice(0, 4);
-      const m = ym.slice(5, 7);
-      let s = 0;
-      let hasAny = false;
-      for (const day of daySet) {
-        const key = `${y}-${m}-${String(day).padStart(2, "0")}`;
-        const v = dailyLookup.get(key);
-        if (v != null) {
-          s += v;
-          hasAny = true;
-        }
-      }
-      return hasAny ? s : null;
-    };
-
     return months.map((m) => {
-      const curr = mMap.get(m)!;
-      const days = monthDays.get(m) || new Set<number>();
-
-      const prevYearMonth = `${getYear(m) - 1}-${String(getMonth(m)).padStart(2, "0")}`;
-      const prevYoY = sumMonthByDaySet(prevYearMonth, days);
+      const rec = monthAggMap.get(m)!;
+      const curr = calcMode === "sum" ? rec.sum : rec.sum / rec.count;
 
       const prevMonth = addMonths(m, -1);
-      const prevMoM = sumMonthByDaySet(prevMonth, days);
+      const prevRec = monthAggMap.get(prevMonth);
+      const prevVal = prevRec ? (calcMode === "sum" ? prevRec.sum : prevRec.sum / prevRec.count) : null;
+
+      const prevYearMonth = `${getYear(m) - 1}-${String(getMonth(m)).padStart(2, "0")}`;
+      const pyRec = monthAggMap.get(prevYearMonth);
+      const pyVal = pyRec ? (calcMode === "sum" ? pyRec.sum : pyRec.sum / pyRec.count) : null;
 
       return {
         label: m,
         units: curr,
-        prev_year_units: prevYoY,
-        yoy_pct: prevYoY != null ? growthPct(curr, prevYoY) : null,
-        mom_pct: prevMoM != null ? growthPct(curr, prevMoM) : null,
+        prev_year_units: pyVal,
+        yoy_pct: pyVal != null ? growthPct(curr, pyVal) : null,
+        mom_pct: prevVal != null ? growthPct(curr, prevVal) : null,
       };
     });
-  }, [sortedDaily, rangeDays, fromIso, toIso, aggFreq]);
+  }, [sortedDaily, dailyLookup, fromIso, toIso, rangeDays, aggFreq, calcMode, monthAggMap]);
 
-  // Control lines for totals (left axis)
+  // Control lines + domains based on shown series
   const controlStatsLeft = useMemo(() => {
     if (!showControlLines) return null;
     if (!dailyForChart.length) return null;
 
     const values: number[] = [];
-
-    if (showUnitsSeries) {
-      for (const p of dailyForChart) {
-        const n = asFiniteNumber(p.units);
-        if (n != null) values.push(n);
-      }
-    } else if (showPrevYearSeries) {
-      for (const p of dailyForChart) {
-        const n = asFiniteNumber(p.prev_year_units);
-        if (n != null) values.push(n);
-      }
-    } else {
-      return null;
-    }
+    if (showUnitsSeries) for (const p of dailyForChart) values.push(p.units);
+    else if (showPrevYearSeries) for (const p of dailyForChart) if (p.prev_year_units != null) values.push(p.prev_year_units);
+    else return null;
 
     if (values.length < 2) return null;
-
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     const variance = values.reduce((a, b) => a + (b - mean) * (b - mean), 0) / values.length;
     const sd = Math.sqrt(variance);
-
-    return {
-      mean,
-      sd,
-      p1: mean + sd,
-      p2: mean + 2 * sd,
-      m1: mean - sd,
-      m2: mean - 2 * sd,
-    };
+    return { mean, sd, p1: mean + sd, p2: mean + 2 * sd, m1: mean - sd, m2: mean - 2 * sd };
   }, [showControlLines, dailyForChart, showUnitsSeries, showPrevYearSeries]);
 
-  // Control lines for YoY% (right axis)
   const controlStatsYoY = useMemo(() => {
     if (!showControlLines) return null;
     if (!dailyForChart.length) return null;
     if (!showYoYSeries) return null;
 
     const values: number[] = [];
-    for (const p of dailyForChart) {
-      const n = asFiniteNumber(p.yoy_pct);
-      if (n != null) values.push(n);
-    }
-
+    for (const p of dailyForChart) if (p.yoy_pct != null) values.push(p.yoy_pct);
     if (values.length < 2) return null;
-
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     const variance = values.reduce((a, b) => a + (b - mean) * (b - mean), 0) / values.length;
     const sd = Math.sqrt(variance);
-
-    return {
-      mean,
-      sd,
-      p1: mean + sd,
-      p2: mean + 2 * sd,
-      m1: mean - sd,
-      m2: mean - 2 * sd,
-    };
+    return { mean, sd, p1: mean + sd, p2: mean + 2 * sd, m1: mean - sd, m2: mean - 2 * sd };
   }, [showControlLines, dailyForChart, showYoYSeries]);
 
   const dailyForChartWithControl = useMemo(() => {
     const base = dailyForChart.map((p) => ({
       ...p,
-      units: p.units != null ? Number(p.units.toFixed(2)) : p.units,
-      prev_year_units:
-        p.prev_year_units != null ? Number(p.prev_year_units.toFixed(2)) : p.prev_year_units,
-      yoy_pct: p.yoy_pct != null ? Number(p.yoy_pct.toFixed(2)) : p.yoy_pct,
-      mom_pct: p.mom_pct != null ? Number(p.mom_pct.toFixed(2)) : p.mom_pct,
+      __mean_units: controlStatsLeft ? controlStatsLeft.mean : null,
+      __p1_units: controlStatsLeft ? controlStatsLeft.p1 : null,
+      __p2_units: controlStatsLeft ? controlStatsLeft.p2 : null,
+      __m1_units: controlStatsLeft ? controlStatsLeft.m1 : null,
+      __m2_units: controlStatsLeft ? controlStatsLeft.m2 : null,
+
+      __mean_yoy: controlStatsYoY ? controlStatsYoY.mean : null,
+      __p1_yoy: controlStatsYoY ? controlStatsYoY.p1 : null,
+      __p2_yoy: controlStatsYoY ? controlStatsYoY.p2 : null,
+      __m1_yoy: controlStatsYoY ? controlStatsYoY.m1 : null,
+      __m2_yoy: controlStatsYoY ? controlStatsYoY.m2 : null,
     }));
-
-    if (!showControlLines) return base as any;
-
-    return base.map((p) => ({
-      ...p,
-      __mean_units: controlStatsLeft ? Number(controlStatsLeft.mean.toFixed(2)) : null,
-      __p1_units: controlStatsLeft ? Number(controlStatsLeft.p1.toFixed(2)) : null,
-      __p2_units: controlStatsLeft ? Number(controlStatsLeft.p2.toFixed(2)) : null,
-      __m1_units: controlStatsLeft ? Number(controlStatsLeft.m1.toFixed(2)) : null,
-      __m2_units: controlStatsLeft ? Number(controlStatsLeft.m2.toFixed(2)) : null,
-
-      __mean_yoy: controlStatsYoY ? Number(controlStatsYoY.mean.toFixed(2)) : null,
-      __p1_yoy: controlStatsYoY ? Number(controlStatsYoY.p1.toFixed(2)) : null,
-      __p2_yoy: controlStatsYoY ? Number(controlStatsYoY.p2.toFixed(2)) : null,
-      __m1_yoy: controlStatsYoY ? Number(controlStatsYoY.m1.toFixed(2)) : null,
-      __m2_yoy: controlStatsYoY ? Number(controlStatsYoY.m2.toFixed(2)) : null,
-    }));
-  }, [dailyForChart, showControlLines, controlStatsLeft, controlStatsYoY]);
+    return base as any[];
+  }, [dailyForChart, controlStatsLeft, controlStatsYoY]);
 
   const anyTotalsShown = showUnitsSeries || showPrevYearSeries || (showControlLines && !!controlStatsLeft);
   const anyPctShown = showYoYSeries || showMoMSeries || (showControlLines && !!controlStatsYoY);
 
-  // NEW: Dynamic Y-axis domains (prevents flat/odd scales + improves readability)
   const leftAxisDomain = useMemo(() => {
-    if (!dailyForChartWithControl?.length) return undefined;
+    if (!dailyForChartWithControl.length) return undefined;
     const vals: Array<number | null> = [];
-    if (showUnitsSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.units));
-    if (showPrevYearSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.prev_year_units));
+    if (showUnitsSeries) vals.push(...dailyForChartWithControl.map((d) => d.units));
+    if (showPrevYearSeries) vals.push(...dailyForChartWithControl.map((d) => d.prev_year_units));
     if (showControlLines) {
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__mean_units));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p1_units));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p2_units));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m1_units));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m2_units));
+      vals.push(...dailyForChartWithControl.map((d) => d.__mean_units));
+      vals.push(...dailyForChartWithControl.map((d) => d.__p1_units));
+      vals.push(...dailyForChartWithControl.map((d) => d.__p2_units));
+      vals.push(...dailyForChartWithControl.map((d) => d.__m1_units));
+      vals.push(...dailyForChartWithControl.map((d) => d.__m2_units));
     }
-    return computeDomain(vals, 0.05, 5);
+    return computeDomain(vals, 0.05, 0.5);
   }, [dailyForChartWithControl, showUnitsSeries, showPrevYearSeries, showControlLines]);
 
   const rightAxisDomain = useMemo(() => {
-    if (!dailyForChartWithControl?.length) return undefined;
+    if (!dailyForChartWithControl.length) return undefined;
     const vals: Array<number | null> = [];
-    if (showYoYSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.yoy_pct));
-    if (showMoMSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.mom_pct));
+    if (showYoYSeries) vals.push(...dailyForChartWithControl.map((d) => d.yoy_pct));
+    if (showMoMSeries) vals.push(...dailyForChartWithControl.map((d) => d.mom_pct));
     if (showControlLines) {
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__mean_yoy));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p1_yoy));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p2_yoy));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m1_yoy));
-      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m2_yoy));
+      vals.push(...dailyForChartWithControl.map((d) => d.__mean_yoy));
+      vals.push(...dailyForChartWithControl.map((d) => d.__p1_yoy));
+      vals.push(...dailyForChartWithControl.map((d) => d.__p2_yoy));
+      vals.push(...dailyForChartWithControl.map((d) => d.__m1_yoy));
+      vals.push(...dailyForChartWithControl.map((d) => d.__m2_yoy));
     }
     return computeDomain(vals, 0.05, 1);
   }, [dailyForChartWithControl, showYoYSeries, showMoMSeries, showControlLines]);
 
-  const monthly = useMemo(() => toMonthly(sortedDaily), [sortedDaily]);
+  // Monthly aggregates for Monthly totals+growth chart + monthly table:
+  const monthlyAgg = useMemo(() => {
+    return calcMode === "sum"
+      ? toMonthlySumComparable(sortedDaily)
+      : toMonthlyAvgFull(sortedDaily);
+  }, [sortedDaily, calcMode]);
 
   const monthlyForChart = useMemo(() => {
-    if (!monthly.length) return [];
-    return monthly.slice(Math.max(0, monthly.length - 24)).map((m) => ({
+    if (!monthlyAgg.length) return [];
+    const last = monthlyAgg.slice(Math.max(0, monthlyAgg.length - 24));
+    return last.map((m) => ({
       month: m.month,
-      total_units: m.total_gwh,
+      value: m.value,
       yoy_pct: m.yoy_pct,
       mom_pct: m.mom_pct,
     }));
-  }, [monthly]);
+  }, [monthlyAgg]);
 
-  const kpis = useMemo(() => computeKPIs(sortedDaily), [sortedDaily]);
+  const kpis = useMemo(() => computeKPIs(sortedDaily, calcMode), [sortedDaily, calcMode]);
+
+  // Weekly/Yearly rows for periodicity table (avg for avg mode; sum for sum mode)
+  const weeklyRows = useMemo(() => {
+    if (!sortedDaily.length) return [];
+
+    const weekSum = new Map<string, number>();
+    const weekCount = new Map<string, number>();
+
+    for (const d of sortedDaily) {
+      const wk = startOfWeekISO(d.date);
+      weekSum.set(wk, (weekSum.get(wk) || 0) + d.value);
+      weekCount.set(wk, (weekCount.get(wk) || 0) + 1);
+    }
+
+    const weeks = Array.from(weekSum.keys()).sort(sortISO);
+    const lastWeeks = weeks.slice(Math.max(0, weeks.length - 104));
+
+    return lastWeeks.map((wk) => {
+      const sum = weekSum.get(wk)!;
+      const cnt = weekCount.get(wk)!;
+      const curr = calcMode === "sum" ? sum : sum / cnt;
+
+      const prevWk = isoMinusDays(wk, 7);
+      const prevSum = weekSum.get(prevWk);
+      const prevCnt = weekCount.get(prevWk);
+      const prevVal = prevSum != null && prevCnt ? (calcMode === "sum" ? prevSum : prevSum / prevCnt) : null;
+
+      const prevYearWk = isoMinusDays(wk, 364);
+      const pySum = weekSum.get(prevYearWk);
+      const pyCnt = weekCount.get(prevYearWk);
+      const pyVal = pySum != null && pyCnt ? (calcMode === "sum" ? pySum : pySum / pyCnt) : null;
+
+      return {
+        weekStart: wk,
+        value: curr,
+        wow_pct: prevVal != null ? growthPct(curr, prevVal) : null,
+        yoy_pct: pyVal != null ? growthPct(curr, pyVal) : null,
+      };
+    });
+  }, [sortedDaily, calcMode]);
+
+  const yearlyFYRows = useMemo(() => {
+    if (!sortedDaily.length) return [];
+
+    const fySum = new Map<string, number>();
+    const fyCount = new Map<string, number>();
+    const fyMaxDate = new Map<string, string>();
+
+    const fyLabelFromIso = (iso: string) => {
+      const y = Number(iso.slice(0, 4));
+      const m = Number(iso.slice(5, 7));
+      const fyEndYear = m >= 4 ? y + 1 : y;
+      return `FY${String(fyEndYear).slice(2)}`;
+    };
+
+    for (const d of sortedDaily) {
+      const fy = fyLabelFromIso(d.date);
+      fySum.set(fy, (fySum.get(fy) || 0) + d.value);
+      fyCount.set(fy, (fyCount.get(fy) || 0) + 1);
+      const curMax = fyMaxDate.get(fy) || "0000-00-00";
+      if (d.date > curMax) fyMaxDate.set(fy, d.date);
+    }
+
+    const fys = Array.from(fySum.keys()).sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)));
+
+    // helper for FY-to-date avg comparisons (needed for incomplete FY)
+    const sumCountInclusive = (startIso: string, endIso: string) => {
+      if (startIso > endIso) return { sum: null as number | null, count: 0 };
+      let sum = 0;
+      let count = 0;
+      let cur = startIso;
+      while (cur <= endIso) {
+        const v = dailyLookup.get(cur);
+        if (v != null) {
+          sum += v;
+          count += 1;
+        }
+        cur = isoPlusDays(cur, 1);
+      }
+      return { sum: count ? sum : null, count };
+    };
+
+    const isoAddYears = (iso: string, deltaYears: number) => {
+      const y = Number(iso.slice(0, 4));
+      const m = Number(iso.slice(5, 7));
+      const d = Number(iso.slice(8, 10));
+      const tryDt = new Date(Date.UTC(y + deltaYears, m - 1, d));
+      if (
+        tryDt.getUTCFullYear() === y + deltaYears &&
+        tryDt.getUTCMonth() === m - 1 &&
+        tryDt.getUTCDate() === d
+      ) return tryDt.toISOString().slice(0, 10);
+      const lastDay = new Date(Date.UTC(y + deltaYears, m, 0));
+      return lastDay.toISOString().slice(0, 10);
+    };
+
+    const fyStartIsoFromFYLabel = (fy: string) => {
+      const yy = Number(fy.slice(2));
+      const fyEndYear = 2000 + yy;
+      const fyStartYear = fyEndYear - 1;
+      return `${fyStartYear}-04-01`;
+    };
+
+    return fys.map((fy) => {
+      const sum = fySum.get(fy)!;
+      const cnt = fyCount.get(fy)!;
+      const curr = calcMode === "sum" ? sum : sum / cnt;
+
+      const prevFY = `FY${String(Number(fy.slice(2)) - 1).padStart(2, "0")}`;
+      const prevSum = fySum.get(prevFY);
+      const prevCnt = fyCount.get(prevFY);
+      const prev = prevSum != null && prevCnt ? (calcMode === "sum" ? prevSum : prevSum / prevCnt) : null;
+
+      // For incomplete FY: compare FY-to-date vs previous FY-to-date using avg if avg mode
+      const fyEndYear = 2000 + Number(fy.slice(2));
+      const fyEnd = `${fyEndYear}-03-31`;
+      const maxDate = fyMaxDate.get(fy)!;
+      const isComplete = maxDate >= fyEnd;
+
+      let yoy: number | null = null;
+
+      if (prevSum != null && prevCnt) {
+        if (isComplete) {
+          yoy = prev != null ? growthPct(curr, prev) : null;
+        } else {
+          const start = fyStartIsoFromFYLabel(fy);
+          const prevStart = fyStartIsoFromFYLabel(prevFY);
+          const prevEnd = isoAddYears(maxDate, -1);
+
+          const currSC = sumCountInclusive(start, maxDate);
+          const prevSC = sumCountInclusive(prevStart, prevEnd);
+
+          const currVal =
+            calcMode === "sum"
+              ? currSC.sum
+              : (currSC.sum != null && currSC.count ? currSC.sum / currSC.count : null);
+
+          const prevVal =
+            calcMode === "sum"
+              ? prevSC.sum
+              : (prevSC.sum != null && prevSC.count ? prevSC.sum / prevSC.count : null);
+
+          yoy = currVal != null && prevVal != null ? growthPct(currVal, prevVal) : null;
+        }
+      }
+
+      return { fy, value: curr, yoy_pct: yoy };
+    });
+  }, [sortedDaily, calcMode, dailyLookup]);
+
+  const hasData = sortedDaily.length > 0;
+
+  /* -----------------------------
+     Actions
+  ----------------------------- */
 
   function upsertOne() {
     setMsg(null);
@@ -1041,8 +1104,8 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     }
 
     const v = Number(String(valueText).replace(/,/g, ""));
-    if (!Number.isFinite(v) || v < 0) {
-      setErrors([`Please enter a valid non-negative number for ${seriesLabel.toLowerCase()}.`]);
+    if (!Number.isFinite(v)) {
+      setErrors([`Please enter a valid number.`]);
       return;
     }
 
@@ -1052,7 +1115,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       return next;
     });
 
-    setMsg(`Saved ${formatDDMMYYYY(iso)}: ${fmtNum(v)} units`);
+    setMsg(`Saved ${formatDDMMYYYY(iso)}: ${fmtValue(v)}`);
     setValueText("");
   }
 
@@ -1065,7 +1128,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   }
 
   function clearAll() {
-    if (!confirm(`Clear all stored ${seriesLabel.toLowerCase()} data from this browser?`)) return;
+    if (!confirm(`Clear all stored data from this browser for ${seriesLabel}?`)) return;
     setDataMap(new Map());
     setMsg("Cleared all data.");
   }
@@ -1077,15 +1140,12 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
     try {
       const text = await file.text();
-      const { parsed, errors: errs } = csvParse(text, valueColumnKey);
-
+      const { parsed, errors: errs } = csvParse(text);
       if (errs.length) setErrors(errs.slice(0, 12));
-
       if (!parsed.length) {
         setErrors((e) => (e.length ? e : ["No valid rows found in CSV."]));
         return;
       }
-
       setDataMap((prev) => mergeRecords(prev, parsed));
       setMsg(`Imported ${parsed.length} rows${errs.length ? ` (with ${errs.length} issues)` : ""}.`);
     } catch {
@@ -1105,201 +1165,26 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   }
 
   function loadSample() {
-    const { parsed } = csvParse(sampleCSV(valueColumnKey), valueColumnKey);
+    const { parsed } = csvParse(sampleCSV(valueColumnKey));
     setDataMap((prev) => mergeRecords(prev, parsed));
     setMsg("Loaded sample data.");
   }
 
   async function fetchLatestFromCEA() {
-    setFetchStatus(null);
-
-    const t = new Date();
-    const dd = String(t.getDate()).padStart(2, "0");
-    const mm = String(t.getMonth() + 1).padStart(2, "0");
-    const yyyy = t.getFullYear();
-    const ddmmyyyy = `${dd}-${mm}-${yyyy}`;
-
-    setFetchStatus(`Fetching for ${ddmmyyyy}...`);
-
-    try {
-      const res = await fetch(`/api/cea/daily?date=${encodeURIComponent(ddmmyyyy)}&kind=${encodeURIComponent(type)}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const j = await res.json();
-
-      const iso = parseInputDate(j?.date);
-      const total = Number(j?.total_mu);
-      if (!iso) throw new Error("Bad date");
-      if (!Number.isFinite(total) || total < 0) throw new Error("Bad total_mu");
-
-      setDataMap((prev) => {
-        const next = new Map(prev);
-        next.set(iso, total);
-        return next;
-      });
-
-      setFetchStatus(`Fetched & saved ${j.date}: ${fmtNum(total)} units`);
-    } catch {
-      setFetchStatus("Auto-fetch failed (backend not deployed / source changed).");
-    }
+    setFetchStatus("Auto-fetch not enabled for this tab.");
   }
 
-  const hasData = sortedDaily.length > 0;
+  const viewLabelWeekly = calcMode === "avg" ? "Weekly (Avg)" : "Weekly (sum)";
+  const viewLabelMonthly = calcMode === "avg" ? "Monthly (Avg)" : "Monthly (sum)";
+  const viewLabelRolling = calcMode === "avg" ? "Last 30 days rolling Avg (YoY Growth)" : "Last 30 Days Rolling Sum (YoY Growth)";
 
-  // ----------------------
-  // Monthly table dropdown data: Monthly / Weekly / Yearly(FY)
-  // ----------------------
+  const periodValueLabel =
+    calcMode === "avg" ? "Avg" : "Total";
 
-  const dailyLookup = useMemo(() => new Map(sortedDaily.map((d) => [d.date, d.value] as const)), [sortedDaily]);
-
-  const weeklyRows = useMemo(() => {
-    if (!sortedDaily.length) return [];
-
-    // Sum per week + offsets set (to ensure comparable partial-week for WoW/YoY)
-    const weekTotals = new Map<string, number>();
-    const weekOffsets = new Map<string, Set<number>>();
-
-    for (const d of sortedDaily) {
-      const wk = startOfWeekISO(d.date);
-      weekTotals.set(wk, (weekTotals.get(wk) || 0) + d.value);
-
-      const off = Math.floor(
-        (new Date(d.date + "T00:00:00Z").getTime() - new Date(wk + "T00:00:00Z").getTime()) / 86400000
-      );
-      if (!weekOffsets.has(wk)) weekOffsets.set(wk, new Set());
-      weekOffsets.get(wk)!.add(off);
-    }
-
-    const sumWeekByOffsets = (weekStartIso: string, offsetsSet: Set<number>) => {
-      let s = 0;
-      let hasAny = false;
-      for (const off of offsetsSet) {
-        const key = isoPlusDays(weekStartIso, off);
-        const v = dailyLookup.get(key);
-        if (v != null) {
-          s += v;
-          hasAny = true;
-        }
-      }
-      return hasAny ? s : null;
-    };
-
-    const weeks = Array.from(weekTotals.keys()).sort(sortISO);
-    const lastWeeks = weeks.slice(Math.max(0, weeks.length - 104));
-
-    return lastWeeks.map((wk) => {
-      const curr = weekTotals.get(wk)!;
-      const offs = weekOffsets.get(wk) || new Set<number>();
-
-      const prevWeek = isoMinusDays(wk, 7);
-      const prevComparable = sumWeekByOffsets(prevWeek, offs);
-      const wow = prevComparable != null ? growthPct(curr, prevComparable) : null;
-
-      const prevYearWeek = isoMinusDays(wk, 364);
-      const prevYearComparable = sumWeekByOffsets(prevYearWeek, offs);
-      const yoy = prevYearComparable != null ? growthPct(curr, prevYearComparable) : null;
-
-      return {
-        weekStart: wk,
-        total: curr,
-        wow_pct: wow,
-        yoy_pct: yoy,
-      };
-    });
-  }, [sortedDaily, dailyLookup]);
-
-  const yearlyFYRows = useMemo(() => {
-    if (!sortedDaily.length) return [];
-
-    // group by FY
-    const fyMap = new Map<string, { total: number; maxDate: string }>();
-    for (const d of sortedDaily) {
-      const fy = fyLabelFromIso(d.date);
-      const rec = fyMap.get(fy) || { total: 0, maxDate: "0000-00-00" };
-      rec.total += d.value;
-      rec.maxDate = rec.maxDate < d.date ? d.date : rec.maxDate;
-      fyMap.set(fy, rec);
-    }
-
-    const fys = Array.from(fyMap.keys()).sort((a, b) => {
-      // FY25, FY26...
-      const na = Number(a.slice(2));
-      const nb = Number(b.slice(2));
-      return na - nb;
-    });
-
-    // For current FY (incomplete), compare FY-to-date vs previous FY-to-date (same end date shifted -1y)
-    const sumRangeInclusive = (startIso: string, endIso: string) => {
-      if (startIso > endIso) return null;
-      let s = 0;
-      let hasAny = false;
-      let cur = startIso;
-      while (cur <= endIso) {
-        const v = dailyLookup.get(cur);
-        if (v != null) {
-          s += v;
-          hasAny = true;
-        }
-        cur = isoPlusDays(cur, 1);
-      }
-      return hasAny ? s : null;
-    };
-
-    const isoAddYears = (iso: string, deltaYears: number) => {
-      const y = Number(iso.slice(0, 4));
-      const m = Number(iso.slice(5, 7));
-      const d = Number(iso.slice(8, 10));
-      const tryDt = new Date(Date.UTC(y + deltaYears, m - 1, d));
-      if (
-        tryDt.getUTCFullYear() === y + deltaYears &&
-        tryDt.getUTCMonth() === m - 1 &&
-        tryDt.getUTCDate() === d
-      ) return tryDt.toISOString().slice(0, 10);
-      const lastDay = new Date(Date.UTC(y + deltaYears, m, 0));
-      return lastDay.toISOString().slice(0, 10);
-    };
-
-    return fys.map((fy) => {
-      const total = fyMap.get(fy)!.total;
-
-      const prevFY = `FY${String(Number(fy.slice(2)) - 1).padStart(2, "0")}`;
-      const prevFYRec = fyMap.get(prevFY);
-
-      // Determine if FY is complete: FY ends Mar-31 of fy end year
-      const fyEndYear = 2000 + Number(fy.slice(2));
-      const fyEnd = `${fyEndYear}-03-31`;
-
-      const maxDate = fyMap.get(fy)!.maxDate;
-      const isComplete = maxDate >= fyEnd;
-
-      let yoy: number | null = null;
-
-      if (prevFYRec) {
-        if (isComplete) {
-          // Full FY vs full FY
-          yoy = growthPct(total, prevFYRec.total);
-        } else {
-          // FY-to-date vs previous FY-to-date (same end date - 1y)
-          const start = fyStartIsoFromFYLabel(fy);
-          const prevStart = fyStartIsoFromFYLabel(prevFY);
-          const prevEnd = isoAddYears(maxDate, -1);
-
-          const currToDate = sumRangeInclusive(start, maxDate);
-          const prevToDate = sumRangeInclusive(prevStart, prevEnd);
-
-          yoy = currToDate != null && prevToDate != null ? growthPct(currToDate, prevToDate) : null;
-        }
-      }
-
-      return { fy, total, yoy_pct: yoy, isComplete };
-    });
-  }, [sortedDaily, dailyLookup]);
-
-  const monthlyRowsForTable = useMemo(() => {
-    // already last 24 months in monthlyForChart
-    return monthlyForChart;
-  }, [monthlyForChart]);
-
-  // ----------------------
+  const ytdLabel =
+    calcMode === "avg"
+      ? "YTD Avg (from 1 Apr)"
+      : "YTD Total (from 1 Apr)";
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -1334,6 +1219,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
             >
               Export CSV
             </button>
+
             <button
               onClick={clearAll}
               disabled={!hasData}
@@ -1361,7 +1247,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               </label>
               <input
                 inputMode="decimal"
-                placeholder="e.g., 4200"
+                placeholder="e.g., 10"
                 value={valueText}
                 onChange={(e) => setValueText(e.target.value)}
                 className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
@@ -1386,7 +1272,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                   />
                 </div>
                 <div className="mt-2 text-xs text-slate-500">
-                  Supported: <span className="font-mono">date,{valueColumnKey}</span> (DD-MM-YYYY, number)
+                  Supported: <span className="font-mono">date,VALUE</span> (DD-MM-YYYY, number)
                 </div>
               </div>
 
@@ -1417,42 +1303,55 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
           <Card title="Quick stats" right={hasData ? `Records: ${sortedDaily.length}` : null}>
             {!hasData ? (
-              <EmptyState onLoadSample={loadSample} />
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center">
+                <div className="text-lg font-semibold text-slate-900">No data yet</div>
+                <div className="mt-2 text-sm text-slate-600">
+                  Add datapoints or import a CSV.
+                </div>
+                <div className="mt-5 flex justify-center">
+                  <button
+                    onClick={loadSample}
+                    className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+                  >
+                    Load sample data
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Stat
                   label="Latest day"
                   value={kpis.latest ? formatDDMMYYYY(kpis.latest.date) : "—"}
-                  sub={kpis.latest ? <MutedSub text={`${fmtNum(kpis.latest.value)} units`} /> : null}
+                  sub={kpis.latest ? <div className="text-sm font-medium text-slate-600">{fmtValue(kpis.latest.value)}</div> : null}
                 />
 
                 <Stat
                   label="Latest YoY (same day)"
-                  value={fmtPct(kpis.latestYoY, 2)}
-                  sub={<MutedSub text="vs same date last year (if available)" />}
+                  value={fmtPct(kpis.latestYoY)}
+                  sub={<div className="text-sm text-slate-500">vs same date last year (if available)</div>}
                 />
 
                 <Stat
-                  label="Current 7-Day Average Units"
-                  value={kpis.avg7 != null ? `${fmtNum(kpis.avg7)} units` : "—"}
+                  label="Current 7-Day Average"
+                  value={kpis.avg7 != null ? fmtValue(kpis.avg7) : "—"}
                   sub={<YoYSub value={kpis.avg7YoY} suffix="YoY" />}
                 />
 
                 <Stat
-                  label="Current 30-Day Average Units"
-                  value={kpis.avg30 != null ? `${fmtNum(kpis.avg30)} units` : "—"}
+                  label="Current 30-Day Average"
+                  value={kpis.avg30 != null ? fmtValue(kpis.avg30) : "—"}
                   sub={<YoYSub value={kpis.avg30YoY} suffix="YoY" />}
                 />
 
                 <Stat
-                  label="YTD Total Units (from 1 Apr)"
-                  value={kpis.ytdTotal != null ? `${fmtNum(kpis.ytdTotal)} units` : "—"}
+                  label={ytdLabel}
+                  value={kpis.ytdValue != null ? fmtValue(kpis.ytdValue) : "—"}
                   sub={<YoYSub value={kpis.ytdYoY} suffix="YoY" />}
                 />
 
                 <Stat
-                  label="MTD Average Units"
-                  value={kpis.mtdAvg != null ? `${fmtNum(kpis.mtdAvg)} units` : "—"}
+                  label="MTD Average"
+                  value={kpis.mtdAvg != null ? fmtValue(kpis.mtdAvg) : "—"}
                   sub={<YoYSub value={kpis.mtdYoY} suffix="YoY" />}
                 />
               </div>
@@ -1468,7 +1367,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                   <thead className="sticky top-0 bg-slate-50">
                     <tr>
                       <th className="px-3 py-2 text-xs font-semibold text-slate-600">Date</th>
-                      <th className="px-3 py-2 text-xs font-semibold text-slate-600">{seriesLabel} (units)</th>
+                      <th className="px-3 py-2 text-xs font-semibold text-slate-600">{seriesLabel} ({unitLabel})</th>
                       <th className="px-3 py-2 text-xs font-semibold text-slate-600"></th>
                     </tr>
                   </thead>
@@ -1479,7 +1378,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                       .map((r) => (
                         <tr key={r.date} className="border-t border-slate-100">
                           <td className="px-3 py-2 font-medium text-slate-900">{formatDDMMYYYY(r.date)}</td>
-                          <td className="px-3 py-2 text-slate-700">{fmtNum(r.value)}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtValue(r.value)}</td>
                           <td className="px-3 py-2 text-right">
                             <button
                               onClick={() => removeDate(r.date)}
@@ -1497,7 +1396,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
           </Card>
         </div>
 
-        {/* ✅ Layout change: Daily card full width; Monthly totals card below it full width */}
+        {/* Daily chart (full width) */}
         <div className="mt-6 grid grid-cols-1 gap-4">
           <Card
             title={`Daily ${seriesLabel.toLowerCase()}`}
@@ -1546,7 +1445,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                             onChange={(e) => setFromIso(e.target.value)}
                             className="mt-1 w-full min-w-[180px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 tabular-nums"
                           />
-                          {/* ✅ Full visible DD/MM/YY */}
                           <div className="mt-1 text-[12px] font-medium text-slate-600 tabular-nums">
                             {fromIso ? formatDDMMYY(fromIso) : ""}
                           </div>
@@ -1560,7 +1458,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                             onChange={(e) => setToIso(e.target.value)}
                             className="mt-1 w-full min-w-[180px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 tabular-nums"
                           />
-                          {/* ✅ Full visible DD/MM/YY */}
                           <div className="mt-1 text-[12px] font-medium text-slate-600 tabular-nums">
                             {toIso ? formatDDMMYY(toIso) : ""}
                           </div>
@@ -1575,9 +1472,9 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
                         >
                           <option value="daily">Daily</option>
-                          <option value="weekly">Weekly (sum)</option>
-                          <option value="monthly">Monthly (sum)</option>
-                          <option value="rolling30">Last 30 Days Rolling Sum (YoY Growth)</option>
+                          <option value="weekly">{viewLabelWeekly}</option>
+                          <option value="monthly">{viewLabelMonthly}</option>
+                          <option value="rolling30">{viewLabelRolling}</option>
                         </select>
                       </div>
                     </div>
@@ -1605,7 +1502,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                               onChange={(e) => setShowUnitsSeries(e.target.checked)}
                               className="h-4 w-4 rounded border-slate-300"
                             />
-                            <span className="font-medium">Total Current</span>
+                            <span className="font-medium">{calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} Current` : "Total Current"}</span>
                           </label>
 
                           <label className="flex items-center gap-2">
@@ -1615,7 +1512,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                               onChange={(e) => setShowPrevYearSeries(e.target.checked)}
                               className="h-4 w-4 rounded border-slate-300"
                             />
-                            <span className="font-medium">Total (previous year)</span>
+                            <span className="font-medium">{calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} (previous year)` : "Total (previous year)"}</span>
                           </label>
 
                           <label className="flex items-center gap-2">
@@ -1668,13 +1565,12 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                       </div>
 
                       <div className="mt-2 text-[11px] text-slate-500">
-                        Weekly/Monthly uses the same day-window for YoY and prior-period % (prevents partial-period distortion).
+                        Weekly/Monthly uses full-period aggregation; YoY/WoW uses same period prior-year/prior-week.
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* ✅ Taller chart + extra margins to avoid axis clipping */}
                 <div className="h-[380px] sm:h-[460px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart
@@ -1687,12 +1583,18 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                       {anyTotalsShown ? (
                         <YAxis
                           yAxisId="left"
-                          width={88}
+                          width={92}
                           tickMargin={10}
                           domain={leftAxisDomain ?? ["auto", "auto"]}
                           padding={{ top: 10, bottom: 10 }}
                           tick={{ fontSize: 12 }}
-                          tickFormatter={(v) => fmtNum(asFiniteNumber(v) ?? null, 2)}
+                          tickFormatter={(v) => {
+                            const n = asFiniteNumber(v);
+                            return n == null ? "—" : new Intl.NumberFormat("en-IN", {
+                              maximumFractionDigits: valueDisplay.decimals,
+                              minimumFractionDigits: valueDisplay.decimals,
+                            }).format(n);
+                          }}
                         />
                       ) : null}
 
@@ -1705,7 +1607,10 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           domain={rightAxisDomain ?? ["auto", "auto"]}
                           padding={{ top: 10, bottom: 10 }}
                           tick={{ fontSize: 12 }}
-                          tickFormatter={(v) => fmtPct(asFiniteNumber(v) ?? null, 2)}
+                          tickFormatter={(v) => {
+                            const n = asFiniteNumber(v);
+                            return n == null ? "—" : `${n.toFixed(2)}%`;
+                          }}
                         />
                       ) : null}
 
@@ -1715,24 +1620,26 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           const key = (item && (item.dataKey as string)) || (name as string);
                           const num = asFiniteNumber(v);
 
-                          if (key === "units") return [`${fmtNum(num ?? null, 2)} units`, "Total Current"];
-                          if (key === "prev_year_units") return [`${fmtNum(num ?? null, 2)} units`, "Total (previous year)"];
-                          if (key === "yoy_pct") return [fmtPct(num ?? null, 2), "YoY %"];
-                          if (key === "mom_pct") return [fmtPct(num ?? null, 2), aggFreq === "weekly" ? "WoW %" : "MoM %"];
+                          const labelCurr = calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} Current` : "Total Current";
+                          const labelPY = calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} (previous year)` : "Total (previous year)";
 
-                          if (key === "__mean_units") return [`${fmtNum(num ?? null, 2)} units`, "Mean"];
-                          if (key === "__p1_units") return [`${fmtNum(num ?? null, 2)} units`, "+1σ"];
-                          if (key === "__p2_units") return [`${fmtNum(num ?? null, 2)} units`, "+2σ"];
-                          if (key === "__m1_units") return [`${fmtNum(num ?? null, 2)} units`, "-1σ"];
-                          if (key === "__m2_units") return [`${fmtNum(num ?? null, 2)} units`, "-2σ"];
+                          if (key === "units") return [fmtValue(num ?? null), labelCurr];
+                          if (key === "prev_year_units") return [fmtValue(num ?? null), labelPY];
+                          if (key === "yoy_pct") return [fmtPct(num ?? null), "YoY %"];
+                          if (key === "mom_pct") return [fmtPct(num ?? null), aggFreq === "weekly" ? "WoW %" : "MoM %"];
 
-                          if (key === "__mean_yoy") return [fmtPct(num ?? null, 2), "Mean (YoY%)"];
-                          if (key === "__p1_yoy") return [fmtPct(num ?? null, 2), "+1σ (YoY%)"];
-                          if (key === "__p2_yoy") return [fmtPct(num ?? null, 2), "+2σ (YoY%)"];
-                          if (key === "__m1_yoy") return [fmtPct(num ?? null, 2), "-1σ (YoY%)"];
-                          if (key === "__m2_yoy") return [fmtPct(num ?? null, 2), "-2σ (YoY%)"];
+                          if (key === "__mean_units") return [fmtValue(num ?? null), "Mean"];
+                          if (key === "__p1_units") return [fmtValue(num ?? null), "+1σ"];
+                          if (key === "__p2_units") return [fmtValue(num ?? null), "+2σ"];
+                          if (key === "__m1_units") return [fmtValue(num ?? null), "-1σ"];
+                          if (key === "__m2_units") return [fmtValue(num ?? null), "-2σ"];
 
-                          if (num != null) return [fmtNum(num, 2), String(name)];
+                          if (key === "__mean_yoy") return [fmtPct(num ?? null), "Mean (YoY%)"];
+                          if (key === "__p1_yoy") return [fmtPct(num ?? null), "+1σ (YoY%)"];
+                          if (key === "__p2_yoy") return [fmtPct(num ?? null), "+2σ (YoY%)"];
+                          if (key === "__m1_yoy") return [fmtPct(num ?? null), "-1σ (YoY%)"];
+                          if (key === "__m2_yoy") return [fmtPct(num ?? null), "-2σ (YoY%)"];
+
                           return [v, String(name)];
                         }}
                         labelFormatter={(l: any) =>
@@ -1742,11 +1649,11 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                       <Legend />
 
                       {showUnitsSeries ? (
-                        <Line yAxisId="left" type="monotone" dataKey="units" name="Total Current" dot={false} strokeWidth={2} stroke="#dc2626" />
+                        <Line yAxisId="left" type="monotone" dataKey="units" name="Current" dot={false} strokeWidth={2} stroke="#dc2626" />
                       ) : null}
 
                       {showPrevYearSeries ? (
-                        <Line yAxisId="left" type="monotone" dataKey="prev_year_units" name="Total (previous year)" dot={false} strokeWidth={2} stroke="#6b7280" connectNulls />
+                        <Line yAxisId="left" type="monotone" dataKey="prev_year_units" name="Previous year" dot={false} strokeWidth={2} stroke="#6b7280" connectNulls />
                       ) : null}
 
                       {showYoYSeries ? (
@@ -1783,9 +1690,10 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
             )}
           </Card>
 
-          <Card title="Monthly totals + growth">
+          {/* Monthly totals + growth */}
+          <Card title={`Monthly ${periodValueLabel} + growth`}>
             {!hasData ? (
-              <div className="text-sm text-slate-600">Add data to see monthly totals and growth.</div>
+              <div className="text-sm text-slate-600">Add data to see monthly metrics.</div>
             ) : (
               <div className="space-y-4">
                 <div className="h-[280px] sm:h-[320px]">
@@ -1793,18 +1701,27 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                     <BarChart data={monthlyForChart} margin={{ top: 10, right: 18, bottom: 10, left: 12 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="month" tick={{ fontSize: 12 }} minTickGap={18} />
-                      <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => fmtNum(asFiniteNumber(v) ?? null, 2)} />
+                      <YAxis
+                        tick={{ fontSize: 12 }}
+                        tickFormatter={(v) => {
+                          const n = asFiniteNumber(v);
+                          return n == null ? "—" : new Intl.NumberFormat("en-IN", {
+                            maximumFractionDigits: valueDisplay.decimals,
+                            minimumFractionDigits: valueDisplay.decimals,
+                          }).format(n);
+                        }}
+                      />
                       <Tooltip
                         formatter={(v: any, n: any) => {
                           const num = asFiniteNumber(v);
-                          if (n === "total_units") return [`${fmtNum(num ?? null, 2)} units`, "Monthly total"];
-                          if (n === "yoy_pct") return [fmtPct(num ?? null, 2), "YoY"];
-                          if (n === "mom_pct") return [fmtPct(num ?? null, 2), "MoM"];
+                          if (n === "value") return [fmtValue(num ?? null), `Monthly ${periodValueLabel}`];
+                          if (n === "yoy_pct") return [fmtPct(num ?? null), "YoY"];
+                          if (n === "mom_pct") return [fmtPct(num ?? null), "MoM"];
                           return [v, n];
                         }}
                       />
                       <Legend />
-                      <Bar dataKey="total_units" name="Monthly total (units)" fill="#dc2626" />
+                      <Bar dataKey="value" name={`Monthly ${periodValueLabel} (${unitLabel})`} fill="#dc2626" />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -1814,41 +1731,20 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                     <LineChart data={monthlyForChart} margin={{ top: 10, right: 18, bottom: 10, left: 12 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="month" tick={{ fontSize: 12 }} minTickGap={18} />
-                      <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => fmtPct(asFiniteNumber(v) ?? null, 2)} />
-                      <Tooltip
-                        formatter={(v: any, n: any) => {
-                          const num = asFiniteNumber(v);
-                          if (n === "yoy_pct") return [fmtPct(num ?? null, 2), "YoY"];
-                          if (n === "mom_pct") return [fmtPct(num ?? null, 2), "MoM"];
-                          return [v, n];
-                        }}
-                      />
+                      <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `${Number(v).toFixed(2)}%`} />
+                      <Tooltip formatter={(v: any, n: any) => [fmtPct(asFiniteNumber(v)), n]} />
                       <Legend />
                       <Line type="monotone" dataKey="yoy_pct" name="YoY %" dot={false} strokeWidth={2} stroke="#16a34a" />
                       <Line type="monotone" dataKey="mom_pct" name="MoM %" dot={false} strokeWidth={2} stroke="#dc2626" />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
-
-                <div className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200">
-                  <div className="text-xs font-semibold text-slate-700">How growth is calculated</div>
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600">
-                    <li>
-                      <span className="font-medium">MoM%</span> compares the same day-range (e.g., 1st–15th vs 1st–15th of
-                      prior month if current month is incomplete).
-                    </li>
-                    <li>
-                      <span className="font-medium">YoY%</span> compares the same day-range (e.g., 1st–15th vs 1st–15th last
-                      year if current month is incomplete).
-                    </li>
-                  </ul>
-                </div>
               </div>
             )}
           </Card>
         </div>
 
-        {/* Monthly table with dropdown */}
+        {/* Periodicity table */}
         <div className="mt-6">
           <Card
             title="Monthly table (Last 24 months)"
@@ -1876,23 +1772,20 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                     <thead className="sticky top-0 bg-slate-50">
                       <tr>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">Month</th>
-                        <th className="px-3 py-2 text-xs font-semibold text-slate-600">Total (units)</th>
+                        <th className="px-3 py-2 text-xs font-semibold text-slate-600">{periodValueLabel} ({unitLabel})</th>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">MoM%</th>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">YoY%</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {monthlyRowsForTable
-                        .slice()
-                        .reverse()
-                        .map((m) => (
-                          <tr key={m.month} className="border-t border-slate-100">
-                            <td className="px-3 py-2 font-medium text-slate-900">{m.month}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtNum(m.total_units, 2)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(m.mom_pct, 2)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(m.yoy_pct, 2)}</td>
-                          </tr>
-                        ))}
+                      {monthlyForChart.slice().reverse().map((m) => (
+                        <tr key={m.month} className="border-t border-slate-100">
+                          <td className="px-3 py-2 font-medium text-slate-900">{m.month}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtValue(m.value)}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtPct(m.mom_pct)}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtPct(m.yoy_pct)}</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 ) : tablePeriod === "weekly" ? (
@@ -1900,25 +1793,20 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                     <thead className="sticky top-0 bg-slate-50">
                       <tr>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">Week</th>
-                        <th className="px-3 py-2 text-xs font-semibold text-slate-600">Total (units)</th>
+                        <th className="px-3 py-2 text-xs font-semibold text-slate-600">{periodValueLabel} ({unitLabel})</th>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">WoW%</th>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">YoY%</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {weeklyRows
-                        .slice()
-                        .reverse()
-                        .map((w) => (
-                          <tr key={w.weekStart} className="border-t border-slate-100">
-                            <td className="px-3 py-2 font-medium text-slate-900">
-                              Week starting {formatDDMMYY(w.weekStart)}
-                            </td>
-                            <td className="px-3 py-2 text-slate-700">{fmtNum(w.total, 2)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(w.wow_pct, 2)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(w.yoy_pct, 2)}</td>
-                          </tr>
-                        ))}
+                      {weeklyRows.slice().reverse().map((w) => (
+                        <tr key={w.weekStart} className="border-t border-slate-100">
+                          <td className="px-3 py-2 font-medium text-slate-900">Week starting {formatDDMMYY(w.weekStart)}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtValue(w.value)}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtPct(w.wow_pct)}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtPct(w.yoy_pct)}</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 ) : (
@@ -1926,21 +1814,18 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                     <thead className="sticky top-0 bg-slate-50">
                       <tr>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">FY</th>
-                        <th className="px-3 py-2 text-xs font-semibold text-slate-600">Total (units)</th>
+                        <th className="px-3 py-2 text-xs font-semibold text-slate-600">{periodValueLabel} ({unitLabel})</th>
                         <th className="px-3 py-2 text-xs font-semibold text-slate-600">YoY%</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {yearlyFYRows
-                        .slice()
-                        .reverse()
-                        .map((r) => (
-                          <tr key={r.fy} className="border-t border-slate-100">
-                            <td className="px-3 py-2 font-medium text-slate-900">{r.fy}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtNum(r.total, 2)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(r.yoy_pct, 2)}</td>
-                          </tr>
-                        ))}
+                      {yearlyFYRows.slice().reverse().map((r) => (
+                        <tr key={r.fy} className="border-t border-slate-100">
+                          <td className="px-3 py-2 font-medium text-slate-900">{r.fy}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtValue(r.value)}</td>
+                          <td className="px-3 py-2 text-slate-700">{fmtPct(r.yoy_pct)}</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 )}
@@ -1950,7 +1835,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
         </div>
 
         <div className="mt-6 text-xs text-slate-500">
-          Tip: Auto-fetch needs a backend proxy because sources often block browser-to-site requests (CORS).
+          Note: Coal PLF & RTM Prices tabs use averages for Weekly/Monthly/Rolling/Yearly and growth is computed on averages.
         </div>
       </div>
     </div>
