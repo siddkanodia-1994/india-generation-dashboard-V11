@@ -516,6 +516,14 @@ export type ElectricityDashboardProps = {
   valueDisplay: { suffix: string; decimals: number };
 };
 
+// ✅ New: explicit view types
+type ViewAs =
+  | "rolling30_avg"
+  | "daily"
+  | "weekly"
+  | "monthly"
+  | "rolling30_sum";
+
 export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const {
     type,
@@ -577,22 +585,24 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const [valueText, setValueText] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
-  const [rangeDays, setRangeDays] = useState(120);
+
+  // ✅ Default "24 Months" ON for all tabs
+  const [rangeDays, setRangeDays] = useState(730);
+
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
 
   const [fromIso, setFromIso] = useState("");
   const [toIso, setToIso] = useState("");
 
-  // ✅ DEFAULT: Rolling Avg is the first/default in all tabs.
-  // - sum tabs (Gen/Demand/Supply): use "rolling30avg"
-  // - avg tabs (Coal PLF/RTM): use "rolling30" (already avg)
-  const [aggFreq, setAggFreq] = useState<
-    "daily" | "weekly" | "monthly" | "rolling30" | "rolling30avg"
-  >(() => (calcMode === "sum" ? "rolling30avg" : "rolling30"));
+  // ✅ Default View as: "Last 30 Days Rolling Avg (YoY Growth)" for all tabs
+  const [aggFreq, setAggFreq] = useState<ViewAs>("rolling30_avg");
 
   const [showUnitsSeries, setShowUnitsSeries] = useState(true);
   const [showPrevYearSeries, setShowPrevYearSeries] = useState(true);
+
+  // ✅ Default "YoY" ON for all tabs
   const [showYoYSeries, setShowYoYSeries] = useState(true);
+
   const [showMoMSeries, setShowMoMSeries] = useState(true);
   const [showControlLines, setShowControlLines] = useState(false);
 
@@ -604,7 +614,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     document.title = title;
   }, [title]);
 
-  // Load CSV from public path, support spaces using encodeURI
+  // Load CSV from public path
   useEffect(() => {
     let cancelled = false;
 
@@ -667,7 +677,12 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   }, [sortedDaily, toIso, fromIso, rangeDays]);
 
   const dailyLookup = useMemo(() => new Map(sortedDaily.map((d) => [d.date, d.value] as const)), [sortedDaily]);
+
   const monthAggMap = useMemo(() => buildMonthAggMap(sortedDaily), [sortedDaily]);
+
+  // ✅ For sum tabs (Generation/Demand/Supply): add new Rolling Avg option,
+  //    keep Rolling Sum option. For avg tabs, Rolling Avg already exists.
+  const supportsRollingSum = calcMode === "sum";
 
   const dailyForChart = useMemo<DailyChartPoint[]>(() => {
     if (!sortedDaily.length) return [];
@@ -697,6 +712,10 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       return { sum: count ? sum : null, count };
     };
 
+    const isRollingAvg = aggFreq === "rolling30_avg";
+    const isRollingSum = aggFreq === "rolling30_sum";
+
+    // Daily
     if (aggFreq === "daily") {
       const sameDayPrevYear = (iso: string) => `${Number(iso.slice(0, 4)) - 1}${iso.slice(4)}`;
       const sameDayPrevMonth = (iso: string) => {
@@ -724,26 +743,25 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       });
     }
 
-    // ✅ Rolling 30: now supports BOTH rolling sum and rolling avg in sum-tabs
-    if (aggFreq === "rolling30" || aggFreq === "rolling30avg") {
-      const rollingMode: "sum" | "avg" =
-        aggFreq === "rolling30avg" ? "avg" : calcMode; // avg tabs already calcMode=avg
-
+    // Rolling 30 (Avg or Sum)
+    if (isRollingAvg || isRollingSum) {
       const points: DailyChartPoint[] = [];
       let cur = f;
       while (cur <= t) {
         const start = isoMinusDays(cur, 29);
         const currSC = sumCountRangeInclusive(start, cur);
+
         const currVal =
-          rollingMode === "sum"
+          isRollingSum
             ? (currSC.sum ?? 0)
             : (currSC.sum != null && currSC.count ? currSC.sum / currSC.count : 0);
 
         const curPrevYear = isoMinusDays(cur, 365);
         const startPrevYear = isoMinusDays(curPrevYear, 29);
         const prevSC = sumCountRangeInclusive(startPrevYear, curPrevYear);
+
         const prevVal =
-          rollingMode === "sum"
+          isRollingSum
             ? prevSC.sum
             : (prevSC.sum != null && prevSC.count ? prevSC.sum / prevSC.count : null);
 
@@ -760,7 +778,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       return points;
     }
 
-    // Weekly: FULL week avg/sum in range
+    // Weekly
     if (aggFreq === "weekly") {
       const startW = startOfWeekISO(f);
       const endW = startOfWeekISO(t);
@@ -808,7 +826,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       });
     }
 
-    // Monthly: FULL month sum/avg in range
+    // Monthly
     const startYM = monthKey(f);
     const endYM = monthKey(t);
 
@@ -842,7 +860,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     });
   }, [sortedDaily, dailyLookup, fromIso, toIso, rangeDays, aggFreq, calcMode, monthAggMap]);
 
-  // Control lines + domains
+  // Control lines + domains based on shown series
   const controlStatsLeft = useMemo(() => {
     if (!showControlLines) return null;
     if (!dailyForChart.length) return null;
@@ -940,7 +958,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     }));
   }, [monthlyAgg]);
 
-  // Mean for monthly bar chart (mean of values shown)
+  // Mean for monthly bar chart
   const monthlyChartMean = useMemo(() => {
     if (!monthlyForChart.length) return null;
     const vals = monthlyForChart
@@ -1016,6 +1034,43 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
     const fys = Array.from(fySum.keys()).sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)));
 
+    const isoAddYears = (iso: string, deltaYears: number) => {
+      const y = Number(iso.slice(0, 4));
+      const m = Number(iso.slice(5, 7));
+      const d = Number(iso.slice(8, 10));
+      const tryDt = new Date(Date.UTC(y + deltaYears, m - 1, d));
+      if (
+        tryDt.getUTCFullYear() === y + deltaYears &&
+        tryDt.getUTCMonth() === m - 1 &&
+        tryDt.getUTCDate() === d
+      ) return tryDt.toISOString().slice(0, 10);
+      const lastDay = new Date(Date.UTC(y + deltaYears, m, 0));
+      return lastDay.toISOString().slice(0, 10);
+    };
+
+    const fyStartIsoFromFYLabel = (fy: string) => {
+      const yy = Number(fy.slice(2));
+      const fyEndYear = 2000 + yy;
+      const fyStartYear = fyEndYear - 1;
+      return `${fyStartYear}-04-01`;
+    };
+
+    const sumCountInclusive = (startIso: string, endIso: string, dailyLookup: Map<string, number>) => {
+      if (startIso > endIso) return { sum: null as number | null, count: 0 };
+      let sum = 0;
+      let count = 0;
+      let cur = startIso;
+      while (cur <= endIso) {
+        const v = dailyLookup.get(cur);
+        if (v != null) {
+          sum += v;
+          count += 1;
+        }
+        cur = isoPlusDays(cur, 1);
+      }
+      return { sum: count ? sum : null, count };
+    };
+
     return fys.map((fy) => {
       const sum = fySum.get(fy)!;
       const cnt = fyCount.get(fy)!;
@@ -1026,12 +1081,47 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       const prevCnt = fyCount.get(prevFY);
       const prev = prevSum != null && prevCnt ? (calcMode === "sum" ? prevSum : prevSum / prevCnt) : null;
 
-      const yoy = prev != null ? growthPct(curr, prev) : null;
+      const fyEndYear = 2000 + Number(fy.slice(2));
+      const fyEnd = `${fyEndYear}-03-31`;
+      const maxDate = fyMaxDate.get(fy)!;
+      const isComplete = maxDate >= fyEnd;
+
+      let yoy: number | null = null;
+
+      if (prevSum != null && prevCnt) {
+        if (isComplete) {
+          yoy = prev != null ? growthPct(curr, prev) : null;
+        } else {
+          const start = fyStartIsoFromFYLabel(fy);
+          const prevStart = fyStartIsoFromFYLabel(prevFY);
+          const prevEnd = isoAddYears(maxDate, -1);
+
+          const currSC = sumCountInclusive(start, maxDate, dailyLookup);
+          const prevSC = sumCountInclusive(prevStart, prevEnd, dailyLookup);
+
+          const currVal =
+            calcMode === "sum"
+              ? currSC.sum
+              : (currSC.sum != null && currSC.count ? currSC.sum / currSC.count : null);
+
+          const prevVal =
+            calcMode === "sum"
+              ? prevSC.sum
+              : (prevSC.sum != null && prevSC.count ? prevSC.sum / prevSC.count : null);
+
+          yoy = currVal != null && prevVal != null ? growthPct(currVal, prevVal) : null;
+        }
+      }
+
       return { fy, value: curr, yoy_pct: yoy };
     });
-  }, [sortedDaily, calcMode]);
+  }, [sortedDaily, calcMode, dailyLookup]);
 
   const hasData = sortedDaily.length > 0;
+
+  /* -----------------------------
+     Actions
+  ----------------------------- */
 
   function upsertOne() {
     setMsg(null);
@@ -1101,6 +1191,12 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     downloadCSV(`india_${type}_${new Date().toISOString().slice(0, 10)}.csv`, [header, ...lines].join("\n"));
   }
 
+  function loadSample() {
+    const { parsed } = csvParse(sampleCSV(valueColumnKey));
+    setDataMap((prev) => mergeRecords(prev, parsed));
+    setMsg("Loaded sample data.");
+  }
+
   async function fetchLatestFromCEA() {
     setFetchStatus("Auto-fetch not enabled for this tab.");
   }
@@ -1108,7 +1204,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const periodValueLabel = calcMode === "avg" ? "Avg" : "Total";
   const ytdLabel = calcMode === "avg" ? "YTD Avg (from 1 Apr)" : "YTD Total (from 1 Apr)";
 
-  // Rolling labels
   const rollingAvgLabel = "Last 30 Days Rolling Avg (YoY Growth)";
   const rollingSumLabel = "Last 30 Days Rolling Sum (YoY Growth)";
 
@@ -1156,7 +1251,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
           </div>
         </div>
 
-        {/* ✅ REORDERED: Daily chart section moved ABOVE Add/Update + Quick Stats + Recent Entries */}
+        {/* ✅ Daily card moved to TOP (all tabs) */}
         <div className="mt-6 grid grid-cols-1 gap-4">
           <Card
             title={`Daily ${seriesLabel.toLowerCase()}`}
@@ -1180,6 +1275,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                     <option value={60}>Last 60 days</option>
                     <option value={120}>Last 120 days</option>
                     <option value={365}>Last 12 months</option>
+                    {/* ✅ Default set to 24 months */}
                     <option value={730}>Last 24 months</option>
                     <option value={1825}>Last 5 years</option>
                     <option value={3650}>Last 10 years</option>
@@ -1226,28 +1322,22 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
                       <div className="mt-3">
                         <div className="text-xs font-medium text-slate-600">View as</div>
-
-                        {/* ✅ Reordered dropdown:
-                            - Rolling Avg becomes FIRST + default for ALL tabs
-                            - Sum tabs show BOTH rolling avg + rolling sum
-                            - Avg tabs show rolling avg only (existing behavior)
-                        */}
                         <select
                           value={aggFreq}
-                          onChange={(e) => setAggFreq(e.target.value as any)}
+                          onChange={(e) => setAggFreq(e.target.value as ViewAs)}
                           className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
                         >
-                          {calcMode === "sum" ? (
-                            <option value="rolling30avg">{rollingAvgLabel}</option>
-                          ) : (
-                            <option value="rolling30">{rollingAvgLabel}</option>
-                          )}
+                          {/* ✅ Requirement: Rolling Avg FIRST + default selection */}
+                          <option value="rolling30_avg">{rollingAvgLabel}</option>
 
                           <option value="daily">Daily</option>
-                          <option value="weekly">{calcMode === "avg" ? "Weekly (Avg)" : "Weekly (sum)"}</option>
-                          <option value="monthly">{calcMode === "avg" ? "Monthly (Avg)" : "Monthly (sum)"}</option>
+                          <option value="weekly">{calcMode === "avg" ? "Weekly (Avg)" : "Weekly (Sum)"}</option>
+                          <option value="monthly">{calcMode === "avg" ? "Monthly (Avg)" : "Monthly (Sum)"}</option>
 
-                          {calcMode === "sum" ? <option value="rolling30">{rollingSumLabel}</option> : null}
+                          {/* ✅ Only Generation/Demand/Supply (sum tabs) show Rolling Sum */}
+                          {supportsRollingSum ? (
+                            <option value="rolling30_sum">{rollingSumLabel}</option>
+                          ) : null}
                         </select>
                       </div>
                     </div>
@@ -1344,7 +1434,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                       </div>
 
                       <div className="mt-2 text-[11px] text-slate-500">
-                        Weekly/Monthly uses full-period aggregation; YoY/WoW uses same period prior-year/prior-week.
+                        Rolling Avg/Sum uses a 30-day window and compares against the same 30-day window last year.
                       </div>
                     </div>
                   </div>
@@ -1397,8 +1487,10 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           const key = (item && (item.dataKey as string)) || (name as string);
                           const num = asFiniteNumber(v);
 
-                          const labelCurr = calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} Current` : "Total Current";
-                          const labelPY = calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} (previous year)` : "Total (previous year)";
+                          const labelCurr =
+                            calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} Current` : "Total Current";
+                          const labelPY =
+                            calcMode === "avg" && aggFreq !== "daily" ? `${periodValueLabel} (previous year)` : "Total (previous year)";
 
                           if (key === "units") return [fmtValue(num ?? null), labelCurr];
                           if (key === "prev_year_units") return [fmtValue(num ?? null), labelPY];
@@ -1420,7 +1512,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           return [v, String(name)];
                         }}
                         labelFormatter={(l: any) =>
-                          `${aggFreq === "daily" ? "Date" : aggFreq === "weekly" ? "Week" : aggFreq === "monthly" ? "Month" : "Date"}: ${l}`
+                          `Label: ${l}`
                         }
                       />
                       <Legend />
@@ -1466,76 +1558,9 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               </>
             )}
           </Card>
-
-          {/* Monthly totals + growth */}
-          <Card title={`Monthly ${periodValueLabel} + growth`}>
-            {!hasData ? (
-              <div className="text-sm text-slate-600">Add data to see monthly metrics.</div>
-            ) : (
-              <div className="space-y-4">
-                <div className="h-[280px] sm:h-[320px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={monthlyForChart} margin={{ top: 10, right: 18, bottom: 10, left: 12 }}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month" tick={{ fontSize: 12 }} minTickGap={18} />
-                      <YAxis
-                        tick={{ fontSize: 12 }}
-                        tickFormatter={(v) => {
-                          const n = asFiniteNumber(v);
-                          if (n == null) return "—";
-                          return new Intl.NumberFormat("en-IN", {
-                            minimumFractionDigits: valueDisplay.decimals,
-                            maximumFractionDigits: valueDisplay.decimals,
-                          }).format(Number(n.toFixed(valueDisplay.decimals)));
-                        }}
-                      />
-
-                      {/* Mean reference line (dotted black) */}
-                      {monthlyChartMean != null ? (
-                        <ReferenceLine
-                          y={monthlyChartMean}
-                          stroke="#000000"
-                          strokeDasharray="6 4"
-                          ifOverflow="extendDomain"
-                          isFront
-                        />
-                      ) : null}
-
-                      <Tooltip
-                        formatter={(v: any, n: any) => {
-                          const num = asFiniteNumber(v);
-                          if (n === "value") return [fmtValue(num ?? null), `Monthly ${periodValueLabel}`];
-                          if (n === "yoy_pct") return [fmtPct(num ?? null), "YoY"];
-                          if (n === "mom_pct") return [fmtPct(num ?? null), "MoM"];
-                          if (num != null) return [fmtValue(num), String(n)];
-                          return [v, String(n)];
-                        }}
-                      />
-                      <Legend />
-                      <Bar dataKey="value" name={`Monthly ${periodValueLabel} (${unitLabel})`} fill="#dc2626" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-
-                <div className="h-[260px] sm:h-[300px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={monthlyForChart} margin={{ top: 10, right: 18, bottom: 10, left: 12 }}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month" tick={{ fontSize: 12 }} minTickGap={18} />
-                      <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `${Number(asFiniteNumber(v) ?? 0).toFixed(2)}%`} />
-                      <Tooltip formatter={(v: any, n: any) => [fmtPct(asFiniteNumber(v)), String(n)]} />
-                      <Legend />
-                      <Line type="monotone" dataKey="yoy_pct" name="YoY %" dot={false} strokeWidth={2} stroke="#16a34a" />
-                      <Line type="monotone" dataKey="mom_pct" name="MoM %" dot={false} strokeWidth={2} stroke="#dc2626" />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            )}
-          </Card>
         </div>
 
-        {/* Add/Update + Stats + Recent Entries (moved BELOW Daily card) */}
+        {/* ✅ Now the lower sections appear BELOW Daily: Add/Update -> Quick Stats -> Recent Entries */}
         <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
           <Card title="Add / Update a day">
             <div className="grid grid-cols-1 gap-3">
@@ -1612,6 +1637,14 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center">
                 <div className="text-lg font-semibold text-slate-900">No data yet</div>
                 <div className="mt-2 text-sm text-slate-600">Add datapoints or import a CSV.</div>
+                <div className="mt-5 flex justify-center">
+                  <button
+                    onClick={loadSample}
+                    className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+                  >
+                    Load sample data
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1693,6 +1726,74 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                       ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </Card>
+        </div>
+
+        {/* Monthly totals + growth */}
+        <div className="mt-6 grid grid-cols-1 gap-4">
+          <Card title={`Monthly ${periodValueLabel} + growth`}>
+            {!hasData ? (
+              <div className="text-sm text-slate-600">Add data to see monthly metrics.</div>
+            ) : (
+              <div className="space-y-4">
+                <div className="h-[280px] sm:h-[320px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={monthlyForChart} margin={{ top: 10, right: 18, bottom: 10, left: 12 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="month" tick={{ fontSize: 12 }} minTickGap={18} />
+                      <YAxis
+                        tick={{ fontSize: 12 }}
+                        tickFormatter={(v) => {
+                          const n = asFiniteNumber(v);
+                          if (n == null) return "—";
+                          return new Intl.NumberFormat("en-IN", {
+                            minimumFractionDigits: valueDisplay.decimals,
+                            maximumFractionDigits: valueDisplay.decimals,
+                          }).format(Number(n.toFixed(valueDisplay.decimals)));
+                        }}
+                      />
+
+                      {monthlyChartMean != null ? (
+                        <ReferenceLine
+                          y={monthlyChartMean}
+                          stroke="#000000"
+                          strokeDasharray="6 4"
+                          ifOverflow="extendDomain"
+                          isFront
+                        />
+                      ) : null}
+
+                      <Tooltip
+                        formatter={(v: any, n: any) => {
+                          const num = asFiniteNumber(v);
+                          if (n === "value") return [fmtValue(num ?? null), `Monthly ${periodValueLabel}`];
+                          if (n === "yoy_pct") return [fmtPct(num ?? null), "YoY"];
+                          if (n === "mom_pct") return [fmtPct(num ?? null), "MoM"];
+                          if (num != null) return [fmtValue(num), String(n)];
+                          return [v, String(n)];
+                        }}
+                      />
+                      <Legend />
+                      <Bar dataKey="value" name={`Monthly ${periodValueLabel} (${unitLabel})`} fill="#dc2626" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="h-[260px] sm:h-[300px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={monthlyForChart} margin={{ top: 10, right: 18, bottom: 10, left: 12 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="month" tick={{ fontSize: 12 }} minTickGap={18} />
+                      <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `${Number(asFiniteNumber(v) ?? 0).toFixed(2)}%`} />
+                      <Tooltip formatter={(v: any, n: any) => [fmtPct(asFiniteNumber(v)), String(n)]} />
+                      <Legend />
+                      <Line type="monotone" dataKey="yoy_pct" name="YoY %" dot={false} strokeWidth={2} stroke="#16a34a" />
+                      <Line type="monotone" dataKey="mom_pct" name="MoM %" dot={false} strokeWidth={2} stroke="#dc2626" />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             )}
           </Card>
@@ -1803,10 +1904,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               </div>
             )}
           </Card>
-        </div>
-
-        <div className="mt-6 text-xs text-slate-500">
-          Note: Mean line in Monthly chart is computed on the last 24 months shown in the bar chart.
         </div>
       </div>
     </div>
